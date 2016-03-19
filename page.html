@@ -125,13 +125,19 @@
 	<tr><td>Укажите верный вариант внедрения javascript c использования обработки события выхода курсора мыши за пределы элемента.</td><td> <p> &lt;A onmouseout="alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt; </p></td></tr>
 	<tr><td>Укажите верный вариант внедрения javascript c использования обработки события двойного клика мыши на элементе.</td><td> <p> &lt;A ondblclickt="alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</p></td></tr>
 	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом:&lt;A onclick="JavaScript:alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Появится окно alert с текстом «Внимание!!!» </p></td></tr>
-	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом:
-&lt;A HREF="alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Произойдет переход на несуществующую страницу </p></td></tr>
-	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом:
-&lt;A HREF="JavaScript:confirm('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Появится окно confirm с текстом «Внимание!!!» </p></td></tr>
-	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом:
-&lt;A "JavaScript:alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Ничего не произойдет </p></td></tr>
-	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>
+	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом: &lt;A HREF="alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Произойдет переход на несуществующую страницу </p></td></tr>
+	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом: &lt;A HREF="JavaScript:confirm('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Появится окно confirm с текстом «Внимание!!!» </p></td></tr>
+	<tr><td>Что произойдет при клике мышью на ссылку оформленную следующим образом: &lt;A "JavaScript:alert('Внимание!!!');"&gt; Внимание!!!&lt;/A&gt;</td><td> <p> Ничего не произойдет </p></td></tr>
+	<tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>document.write('test"+i+"&lt;br&gt;');<br>&lt;/script&gt;</td><td> <p> test"+i+" </p></td></tr>
+	<tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>eval("document.write('test"+i+"&lt;br&gt;')");<br>&lt;/script&gt;</td><td> <p> test5 </p></td></tr>    
+	<tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5; i++;<br>document.write("test"+i+"&lt;br&gt;");<br>&lt;/script&gt;</td><td> <p> test6 </p></td></tr>     
+    <tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>document.write("test"+i++);<br>&lt;/script&gt;</td><td> <p> test5 </p></td></tr> 
+    <tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>document.write("test"++i);<br>&lt;/script&gt;</td><td> <p> ничего не отобразится </p></td></tr> 
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &gt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &gt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 3 3 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[0]+" ");<br>document.write(a[1]);<br>&lt;/script&gt;</td><td> <p> 1 3 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[4]+" ");<br>document.write(a[5]);<br>&lt;/script&gt;</td><td> <p> 9 9 </p></td></tr>    
 	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>
 	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>
 	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>
