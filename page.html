@@ -24,6 +24,10 @@
 			table {
 			margin-top: 20px;
 			}
+          html, body {
+            min-width: 1005px; /* your desired width */
+            max-width: 100%;
+          }  
 	</style>
 
 		<script type="text/javascript" src="js/jquery.js"></script>
@@ -171,9 +175,58 @@
     <tr><td>Как в PHP в существующий массив $arr добавить два элемента со значениями 3 и 5?</td><td> <p> $arr[]=3; $arr[]=5; </p></td></tr>  
     <tr><td>Как в PHP из существующего массива $arr получить значение элемента с ключом (индексом) 5?</td><td> <p> $e=$arr[5]; </p></td></tr>    
     <tr><td>Как в PHP вывести все значения массива $arr?</td><td> <p> print_r($arr); </p></td></tr>    
-	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>
-	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> Размещение описания стиля в заголовке документа в теге STYLE </p></td></tr>      
-</table>
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($a="q", $b)<br>{<br>echo $a;<br>return $a . $b;<br>}<br>Test(1);<br>?&gt;</td><td> <p> предупреждение, что не хватает второго аргумента для функции, и значение “1” </p></td></tr>   
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $a;<br>return $a . $b;<br>}<br>Test(1);<br>?&gt;</td><td> <p> q </p></td></tr>    
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $a;<br>return $a . $b;<br>}<br>print Test(1);<br>?&gt;</td><td> <p> qq1 </p></td></tr>    
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $b;<br>return $a . $b;<br>}<br>print Test(1);<br>?&gt;</td><td> <p> 1q1 </p></td></tr>   
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($a="q", $b)<br>{<br>echo $b;<br>return $a . $b;<br>}<br>print Test('a');<br>?&gt;</td><td> <p> предупреждение, что не хватает второго аргумента для функции, и значение “a” </p></td></tr>      
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>global $a;<br>echo $a;<br>return $a . $b;<br>}<br>test("Test");<br>?&gt;</td><td> <p> quit </p></td></tr>    
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>global $a;<br>echo $a;<br>return $a . $b;<br>}<br>print test("Test");<br>?&gt;</td><td> <p> quitquitTest </p></td></tr>     
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>echo $a;<br>return $a . $b;<br>}<br>print test("Test");<br>?&gt;</td><td> <p> Test </p></td></tr>   
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>echo $a;<br>return $a . $b;<br>}<br>print test($a);<br>?&gt;</td><td> <p> quit </p></td></tr>     
+    <tr><td>Что будет выведено на экран после выполнения следующего кода:<br>&lt;?php<br>$a=10;<br>print ++$a." ";<br>$a-=5;<br>print $a++." ";<br>if($a=10)<br>{<br>print $a;<br>}<br>?&gt;</td><td> <p> 11 6 10</p></td></tr>    
+    <tr><td>Что будет выведено на экран после выполнения следующего кода:<br>&lt;?php<br>$a=10;<br>print ++$a." ";<br>$a-=5;<br>print $a++." ";<br>if(true)<br>{<br>print $a;<br>}<br>?&gt;</td><td> <p> 11 6 7</p></td></tr>      
+    <tr><td>Что будет выведено на экран после выполнения следующего кода:<br>&lt;?php<br>$a=10;<br>print ++$a." ";<br>$a-=5;<br>print $a--." ";<br>if($b=5)<br>{<br>print $a;<br>}<br>?&gt;</td><td> <p> 11 6 5</p></td></tr> 
+    <tr><td>Что будет выведено на экран после выполнения следующего кода:<br>&lt;?php<br>$a=10;<br>print ++$a." ";<br>$a-=5;<br>print $a--." ";<br>if($b=5)<br>{<br>print --$b;<br>}<br>?&gt;</td><td> <p> 11 6 4</p></td></tr>     
+	<tr><td>Какая PHP функция используется для закрытия файла?</td><td> <p> fopen</p></td></tr>	
+    <tr><td>Какая PHP функция используется для открытия файла?</td><td> <p> fclose</p></td></tr>   
+    <tr><td>Какая PHP функция используется для чтения из файла?</td><td> <p> fread</p></td></tr>
+    <tr><td>Какая PHP функция используется для записи в файл?</td><td> <p> fwrite</p></td></tr>     
+    <tr><td>Какая PHP функция используется для удаления файла?</td><td> <p> unlink</p></td></tr>   
+    <tr><td>Какая PHP функция используется для подключения к mysql-серверу?</td><td> <p> mysql_connect</p></td></tr>      
+    <tr><td>Какая PHP функция используется для выбора базы на mysql-сервере?</td><td> <p> mysql_select_db</p></td></tr>       
+    <tr><td>Какая PHP функция используется для отключения от mysql-сервера?</td><td> <p> mysql_close</p></td></tr>      
+    <tr><td>Какая PHP функция используется для выполнения sql-запросов к mysql-серверу?</td><td> <p> mysql_query</p></td></tr>     
+    <tr><td>Какая PHP функция используется для вывода ошибок от mysql-сервера?</td><td> <p> mysql_error</p></td></tr>   
+    <tr><td>Какой тип значения вернет PHP функция mysql_connect при успешном выполнении?</td><td> <p>resource</p></td></tr>      
+    <tr><td>Какой тип значения вернет PHP функция fopen при успешном выполнении?</td><td> <p>resource</p></td></tr>    
+    <tr><td>Какой тип значения вернет PHP функция split при успешном выполнении?</td><td> <p>string</p></td></tr>     
+    <tr><td>Какой тип значения вернет PHP функция split при успешном выполнении?</td><td> <p>string</p></td></tr>
+    <tr><td>Какой будет результат выполнения следующей программы?<br>&lt;?php<br>$value = array("0","","1");<br>foreach ($value as $v) {<br>if (!$v) $result[] = true;<br>else $result[] = false;<br>}<br>print_r($result);<br>?&gt;</td><td> <p> Array ([0] => 1 [1] => 1 [2] => ) </p></td></tr>  
+    <tr><td>Какой будет результат выполнения следующей программы?<br>&lt;?php<br>$value = array("0","","1");<br>foreach ($value as $v) {<br>if ($v) $result[] = true;<br>else $result[] = false;<br>}<br>print_r($result);<br>?&gt;</td><td> <p> Array([0] => [1] => [2] => 1) </p></td></tr>    
+    <tr><td>Какой будет результат выполнения следующей программы?<br>&lt;?php<br>$value = array("0","","1");<br>foreach ($value as $v) {<br>if ($v) $result[] = true;<br>else $result[] = false;<br>print $v;<br>}?&gt;</td><td> <p> 01 </p></td></tr>     
+    <tr><td>Какой будет результат выполнения следующей программы?<br>&lt;?php<br>$value = array("0","","1");<br>foreach ($value as $v) {<br>if (!$v) $result[] = 'true';<br>else $result[] = 'false';<br>}<br>print_r($result);<br>?&gt;</td><td> <p> Array( [0] => true [1] => true [2] => false) </p></td></tr>   
+    <tr><td>Какой будет результат выполнения следующей программы?<br>&lt;?php<br>$value = array("0","","1");<br>foreach ($value as $v) {<br>if ($v) $result[] = 'true';<br>else $result[] = 'false';<br>}<br>print_r($result);<br>?&gt;</td><td> <p> Array( [0] => false [1] => false [2] => true) </p></td></tr>    
+	<tr><td>Как разделяются инструкции в языке PHP?</td><td> <p> с помощью символа ; </p></td></tr>	
+    <tr><td>Какой символ ставится перед именами переменных в PHP?</td><td> <p> $ </p></td></tr>    
+    <tr><td>Что из перечисленных названий не является CMS?</td><td> <p> Apache </p></td></tr>        
+    <tr><td>Что из перечисленных названий является CMS?</td><td> <p> Sugar </p></td></tr>      
+    <tr><td>Чем цикл while отличается от цикла do..while?</td><td> <p> блок действий цикла do..while гарантированно выполняется один раз </p></td></tr>   
+	<tr><td>Какой текст выведется при нажатии на кнопку на страничке со следующим кодом<br>&lt;script&gt;<br>function print(x)<br>{<br>var y=100;<br>return x+y;<br>}<br>&lt;/script&gt;<br>&lt;input type="button" name="pro" onClick="alert(print(this.name));"&gt;</td><td> <p> pro100 </p></td></tr>  	
+    <tr><td>Чем в PHP отличаются функции print и print_r?</td><td> <p> print_r выводит массивы </p></td></tr>     
+    <tr><td>На какой стороне выполняются PHP-cкрипты?</td><td> <p> На сервере </p></td></tr>      
+    <tr><td>На какой стороне выполняются JavaScript-cкрипты?</td><td> <p> На клиенте </p></td></tr>       
+    <tr><td>Сколько бит в одном байте?</td><td> <p> 8 </p></td></tr>   
+	<tr><td>Укажите тип элементов(блочные/строчные)</td><td> <p> span: строчный. <br> i: строчный. <br> p: блочный. <br> div: блочный. <br> b: строчный.</p></td></tr>
+	<tr><td>Можно ли с помощью javascript управлять cookies?</td><td> <p> Да </p></td></tr>
+	<tr><td>При использовании стилей действуют следующие правила старшинства стилей, укажите их порядок.</td><td> <p> 1.	сначала применяются стили браузера по умолчанию; <br> 2.	стили браузера по умолчанию переопределяются прилинкованными стилями (элемент LINK заголовка документа); <br> 3.	прилинкованные стили переопределяются описаниями стилей в элементе STYLE ;<br>4.	стили элемента STYLE переопределяются атрибутом STYLE в любом из элементов разметки.</p></td></tr>
+	<tr><td>Написать программу, которая выводит "жирными" буквами (тег &lt;b&gt;) строку "Добро пожаловать!" с использованием языка PHP.</td><td> <p> &lt;?php<br>echo "Добро пожаловать!";<br>?&gt; </p></td></tr>
+	<tr><td>Выберите допустимые варианты использования for в PHP</td><td> <p>for (; ; )<br>for ($i = 1; ; $i++)<br>for ($i = 1; $i &lt;= 10; $i++)</p></td></tr>
+	<tr><td>скалярные типы данных, которые поддерживает PHP.</td><td> <p>boolean (двоичные данные)<br>integer (целые числа)<br>float (числа с плавающей точкой или 'double')<br>string (строки)</p></td></tr>
+	<tr><td>Соотнести</td><td> <p>&& - И <br>|| - Или <br>or - Или<br>and - И<br>! – Отрицание<br>xor - Исключающее или </p></td></tr>
+	<tr><td>Соотнести</td><td> <p>=== - Тождественно равно (эквивалентно)<br>== - Равно<br>&lt;&gt; - Не равно<br>!= - Не равно<br>&gt;= - 	Больше или равно<br>&lt;= - Меньше или равно<br>!== - Тождественно не равно<br>=&gt; - Нет такого </p></td></tr>
+	<tr><td>Какие встроенные типы и структуры данных поддерживает JavaScript</td><td> <p>Литералы<br>Переменные<br>Массивы<br>Функции<br>Объекты </p></td></tr>
+	</table>
 
 </body>
 </html>
