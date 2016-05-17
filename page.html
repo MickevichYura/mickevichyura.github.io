@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-	<title>Helper</title>
+	<title>Translate</title>
 	<meta charset="UTF-8">
 	<link rel="stylesheet" type="text/css">
 	<style>
@@ -162,7 +162,7 @@
     <tr><td>Дана следующая html форма:<br>&lt;form method="post" name="my_form"&gt;<br>Field 1 &lt;input type=text name="f1"&gt;&lt;br&gt;<br>Text  &lt;textarea name="f2"&gt;&lt;/textarea&gt;<br>&lt;input type=submit&gt;<br>&lt;/form&gt;<br>Как в PHP-скрипты можно получить переданные клиентом значения из этой формы?</td><td> <p> $_REQUEST["f1"] и $_REQUEST["f2"] </p></td></tr>   
     <tr><td>Дана следующая html форма:<br>&lt;form method="get" name="my_form"&gt;<br>Field 1 &lt;input type=text name="f1"&gt;&lt;br&gt;<br>Text  &lt;textarea name="f2"&gt;&lt;/textarea&gt;<br>&lt;input type=submit&gt;<br>&lt;/form&gt;<br>Как в PHP-скрипты можно получить переданные клиентом значения из этой формы?</td><td> <p> $_REQUEST["f1"] и $_REQUEST["f2"] </p></td></tr>   
     <tr><td>Дана следующая html форма:<br>&lt;form method="get" name="my_form"&gt;<br>Field 1 &lt;input type=text name="f1"&gt;&lt;br&gt;<br>Text  &lt;textarea name="f2"&gt;&lt;/textarea&gt;<br>&lt;input type=submit&gt;<br>&lt;/form&gt;<br>Как в PHP-скрипты можно получить переданные клиентом значения из этой формы?</td><td> <p> $_GET["f1"] и $_GET["f2"] </p></td></tr>  
-    <tr><td>Дана следующая html форма:<br>&lt;form"&gt;<br>Field 1 &lt;input type=text name="f1"&gt;&lt;br&gt;<br>Text  &lt;textarea name="f2"&gt;&lt;/textarea&gt;<br>&lt;input type=submit&gt;<br>&lt;/form&gt;<br>Как в PHP-скрипты можно получить переданные клиентом значения из этой формы?</td><td> <p> Форма не отправится </p></td></tr>  
+    <tr><td>Дана следующая html форма:<br>&lt;form&gt;<br>Field 1 &lt;input type=text name="f1"&gt;&lt;br&gt;<br>Text  &lt;textarea name="f2"&gt;&lt;/textarea&gt;<br>&lt;input type=submit&gt;<br>&lt;/form&gt;<br>Как в PHP-скрипты можно получить переданные клиентом значения из этой формы?</td><td> <p> Форма не отправится </p></td></tr>  
 	<tr><td>Как оформляется начало и завершение блока PHP?</td><td> <p> &lt;? … ?&gt; </p></td></tr>	
     <tr><td>Как оформляется начало и завершение блока многострочного комментария в PHP?</td><td> <p> /* … */ </p></td></tr>    
     <tr><td>Как оформляется начало блока однострочного комментария в PHP?</td><td> <p> // ... </p></td></tr>   
@@ -180,7 +180,8 @@
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $a;<br>return $a . $b;<br>}<br>Test(1);<br>?&gt;</td><td> <p> q </p></td></tr>    
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $a;<br>return $a . $b;<br>}<br>print Test(1);<br>?&gt;</td><td> <p> qq1 </p></td></tr>    
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($b, $a="q")<br>{<br>echo $b;<br>return $a . $b;<br>}<br>print Test(1);<br>?&gt;</td><td> <p> 1q1 </p></td></tr>   
-    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($a="q", $b)<br>{<br>echo $b;<br>return $a . $b;<br>}<br>print Test('a');<br>?&gt;</td><td> <p> предупреждение, что не хватает второго аргумента для функции, и значение “a” </p></td></tr>      
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>function Test($a="q", $b)<br>{<br>echo $b;<br>return $a . $b;<br>}<br>print Test('a');<br>?&gt;</td><td> <p> предупреждение, что не хватает второго аргумента для функции, и значение “a” </p></td></tr> 
+    <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>echo $a;<br>return $a . $b;<br>}<br>test("Test");<br>?&gt;</td><td> <p>сработает без ошибок, но ничего не отобразится</p></td></tr>        
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>global $a;<br>echo $a;<br>return $a . $b;<br>}<br>test("Test");<br>?&gt;</td><td> <p> quit </p></td></tr>    
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>global $a;<br>echo $a;<br>return $a . $b;<br>}<br>print test("Test");<br>?&gt;</td><td> <p> quitquitTest </p></td></tr>     
     <tr><td>Каким будет результат работы следующей программы<br>&lt;?php<br>$a="quit";<br>function Test($b)<br>{<br>echo $a;<br>return $a . $b;<br>}<br>print test("Test");<br>?&gt;</td><td> <p> Test </p></td></tr>   
