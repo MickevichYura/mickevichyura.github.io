@@ -25,7 +25,7 @@
 			margin-top: 20px;
 			}
           html, body {
-            min-width: 1005px; /* your desired width */
+            min-width: 100px; /* your desired width */
             max-width: 100%;
           }  
 	</style>
@@ -109,7 +109,7 @@
 	<tr><td>На какие элементы будет действовать следующее описание стиля: &lt;STYLE&gt; .div div {color: red;} &lt;/STYLE&gt;</td><td> <p> Все элементы “div” вложенные в элементы с “class=div” </p></td></tr>
 	<tr><td>На какие элементы будет действовать следующее описание стиля: &lt;STYLE&gt; #div p {color: magenta;} &lt;/STYLE&gt;</td><td> <p> Все элементы “p” вложенные в элементы с “id=div” </p></td></tr>
 	<tr><td>Какой CSS параметр отвечает за внешний отступ элемента?</td><td> <p> margin</p></td></tr>
-	<tr><td>Укажите способ применения CSS стиля в HTML.</td><td> <p> padding </p></td></tr>
+	<tr><td>Какой CSS параметр отвечает за внутренний отступ элемента?</td><td> <p> padding </p></td></tr>
 	<tr><td> Какой CSS параметр отвечает за выравнивание содержимого элемента?</td><td> <p> text-align </p></td></tr>
 	<tr><td>Какой CSS параметр отвечает за границы элемента?</td><td> <p> border </p></td></tr>
 	<tr><td>Какой CSS параметр отвечает за цвет фона элемента?</td><td> <p> background-color </p></td></tr>
@@ -137,11 +137,11 @@
 	<tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5; i++;<br>document.write("test"+i+"&lt;br&gt;");<br>&lt;/script&gt;</td><td> <p> test6 </p></td></tr>     
     <tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>document.write("test"+i++);<br>&lt;/script&gt;</td><td> <p> test5 </p></td></tr> 
     <tr><td>Укажите результат (видимый в браузере) выполнения следующего кода <br>&lt;script&gt;<br>var i=5;<br>document.write("test"++i);<br>&lt;/script&gt;</td><td> <p> ничего не отобразится </p></td></tr> 
-    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &gt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
-    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &gt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 3 3 </p></td></tr>
-    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
-    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[0]+" ");<br>document.write(a[1]);<br>&lt;/script&gt;</td><td> <p> 1 3 </p></td></tr>
-    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &gt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[4]+" ");<br>document.write(a[5]);<br>&lt;/script&gt;</td><td> <p> 9 9 </p></td></tr>    
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &lt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return 1; if(a &lt; b) return -1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 3 3 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &lt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g);<br>document.write(a[1]+" ");<br>document.write(a[2]);<br>&lt;/script&gt;</td><td> <p> 9 6 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &lt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[0]+" ");<br>document.write(a[1]);<br>&lt;/script&gt;</td><td> <p> 1 3 </p></td></tr>
+    <tr><td>Какой результат будет виден в браузере после выполнения данного кода? <br>&lt;script&gt;<br>a = new Array(3,6,9,9,3,1);<br>function g(a,b)<br>{ if(a &gt; b) return -1; if(a &lt; b) return 1;<br>if(a==b) return 0;}<br>b = a.sort(g); a.reverse();<br>document.write(a[4]+" ");<br>document.write(a[5]);<br>&lt;/script&gt;</td><td> <p> 9 9 </p></td></tr>    
 	<tr><td>Какой из предоставленных языков программирования изначально использовался для обработки текстовой информации?</td><td> <p> Perl </p></td></tr>
     <tr><td>Какой из предоставленных языков программирования изначально разрабатывался для использования в Web-программировании?</td><td> <p> PHP </p></td></tr>
     <tr><td>Какой из предоставленных языков программирования является интерпретируемым?</td><td> <p> Perl </p></td></tr>
