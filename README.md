@@ -2,5 +2,5 @@
 my own site 
 http://mickevichyura.github.io/
 - [x] Sample onSaveInstanceState
-- [ ] Sample onSaveInstanceState
+- [x] Sample onSaveInstanceState
 - [ ] Sample onSaveInstanceState
