@@ -22,7 +22,8 @@
 	var TREE_DEPTH    = 4;       // глубина сбора дерева для главной страницы
 	var TREE_MAX_NODE = 100;     // сколько папок максимум обходим за один уровень
 
-	var THUMB_PARALLEL = 4; // сколько превью тянем одновременно, чтобы не завалить сервер
+	var THUMB_PARALLEL = 4;    // сколько превью тянем одновременно, чтобы не завалить сервер
+	var TMDB_MAX_LOOKUP = 40;  // сколько поисков TMDB максимум на один список
 
 	var ICON_PLAY = "<svg viewBox=\"0 0 128 128\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"64\" cy=\"64\" r=\"56\" stroke=\"white\" stroke-width=\"16\"/><path d=\"M90.5 64.3827L50 87.7654L50 41L90.5 64.3827Z\" fill=\"white\"/></svg>";
 	var ICON_FOLDER = "<svg viewBox=\"0 0 128 112\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect y=\"20\" width=\"128\" height=\"92\" rx=\"13\" fill=\"white\"/><path d=\"M29.9963 8H98.0037C96.0446 3.3021 91.4079 0 86 0H42C36.5921 0 31.9555 3.3021 29.9963 8Z\" fill=\"white\" fill-opacity=\"0.23\"/><rect x=\"11\" y=\"8\" width=\"106\" height=\"76\" rx=\"13\" fill=\"white\" fill-opacity=\"0.51\"/></svg>";
@@ -187,6 +188,30 @@
 
 		isAudio: function (node) {
 			return (node.type || '').indexOf('object.item.audioItem') === 0;
+		},
+
+		/**
+		 * Сезон и серия: сервер отдаёт их в метаданных, это надёжнее разбора имени файла
+		 */
+		episode: function (node) {
+			var s = parseInt(node['upnp:episodeSeason']);
+			var e = parseInt(node['upnp:episodeNumber']);
+			if (!isNaN(s) && !isNaN(e) && e > 0) return { season: s, episode: e };
+			return parseEpisode(node.title || '');
+		},
+
+		/**
+		 * Имя для поиска в TMDB: отрезаем маркер серии, год и релизные теги
+		 */
+		cleanName: function (name) {
+			var s = (name || '').replace(/\.[a-z0-9]{2,4}$/i, ''); // расширение
+			s = s.replace(/[._]+/g, ' ');
+			s = s.replace(/\[[^\]]*\]|\([^)]*\)/g, ' ');           // [qqss44], (S02)
+			s = s.split(/\b(?:s\d{1,2}\s?e\d{1,3}|\d{1,2}x\d{1,3})\b/i)[0];
+			s = s.replace(/\bs\d{1,2}\b.*$/i, ' ');                // одинокий S01 и всё после
+			s = s.replace(/\b(19|20)\d{2}\b.*$/, ' ');             // год и всё после
+			s = s.replace(/\b(2160p|1080p|720p|480p|4k|uhd|hdr|sdr|web-?dl|webrip|blu-?ray|bdrip|hdrip|dvdrip|remux|x26[45]|h\.?26[45]|hevc|avc|aac|ac3|dts|ddp?5?\.?1?|rus|eng|sub|subs|dub|avo|dvo|mvo)\b.*$/i, ' ');
+			return s.replace(/\s+/g, ' ').trim();
 		},
 
 		/**
@@ -401,6 +426,78 @@
 		}
 	};
 
+	/**
+	 * TMDB: постеры для папок, кадры и названия серий для файлов
+	 *
+	 * Локальный сервер картинок не отдаёт, поэтому превью берём отсюда.
+	 * Всё кешируется в Storage, промахи тоже - чтобы не искать по кругу
+	 * домашнее видео, которого в базе нет.
+	 */
+	var TMDB = {
+		net: null,
+
+		request: function (url) {
+			if (!TMDB.net) TMDB.net = new Lampa.Reguest();
+
+			return new Promise(function (resolve) {
+				TMDB.net.silent(Lampa.TMDB.api(url), resolve, function () { resolve(null); });
+			});
+		},
+
+		params: function () {
+			return 'api_key=' + Lampa.TMDB.key() + '&language=' + Lampa.Storage.get('language', 'ru');
+		},
+
+		image: function (path, size) {
+			return path ? Lampa.TMDB.image('t/p/' + size + path) : '';
+		},
+
+		/**
+		 * Сопоставить имя папки или файла с фильмом/сериалом
+		 */
+		match: async function (title) {
+			var key = DLNA.cleanName(title).toLowerCase();
+			if (!key) return null;
+
+			var cache = Lampa.Storage.cache('dlna_tmdb_match', 500, {});
+			if (cache[key]) return cache[key].miss ? null : cache[key];
+
+			var json = await TMDB.request('search/multi?' + TMDB.params() + '&query=' + encodeURIComponent(key));
+			var found = json && json.results ? json.results.filter(function (r) {
+				return (r.media_type === 'tv' || r.media_type === 'movie') && r.poster_path;
+			})[0] : null;
+
+			cache = Lampa.Storage.cache('dlna_tmdb_match', 500, {});
+			cache[key] = found ? { type: found.media_type, id: found.id, poster: found.poster_path } : { miss: 1 };
+			Lampa.Storage.set('dlna_tmdb_match', cache);
+
+			return found ? cache[key] : null;
+		},
+
+		/**
+		 * Кадры и названия всех серий сезона - одним запросом
+		 */
+		season: async function (id, season) {
+			var key = id + '_' + season;
+
+			var cache = Lampa.Storage.cache('dlna_tmdb_season', 200, {});
+			if (cache[key]) return cache[key];
+
+			var json = await TMDB.request('tv/' + id + '/season/' + season + '?' + TMDB.params());
+			var episodes = {};
+
+			if (json && json.episodes) json.episodes.forEach(function (e) {
+				episodes[e.episode_number] = { still: e.still_path || '', name: e.name || '' };
+			});
+
+			cache = Lampa.Storage.cache('dlna_tmdb_season', 200, {});
+			cache[key] = episodes;
+			Lampa.Storage.set('dlna_tmdb_season', cache);
+
+			return episodes;
+		}
+	};
+
 	function synology(component, _object) {
 		var network = new Lampa.Reguest();
 		var extract = {};
@@ -573,7 +670,7 @@
 				results = {'player_links': {"movie": []}};
 
 				results['player_links']["movie"] = videoItemsBest3.map(item => {
-					var se = parseEpisode(item.title || '');
+					var se = DLNA.episode(item); // сезон/серия из метаданных сервера, иначе из имени файла
 					return {
 						title: item.title,
 						quality: item.resolution,
@@ -994,40 +1091,48 @@
 
     function loadThumbs() {
     	while (thumb_active < THUMB_PARALLEL && thumb_queue.length) {
-    		var task = thumb_queue.shift();
-    		var done = false;
-    		var finish = function () {
-    			if (done) return;
-    			done = true;
-    			thumb_active--;
-    			loadThumbs();
-    		};
-
-    		thumb_active++;
-    		Lampa.Utils.imgLoad(task.img, task.src, function (img) {
-    			img.classList.add('loaded');
-    			finish();
-    		}, function (img) {
-    			img.style.display = 'none'; // imgLoad подставляет свою картинку-заглушку, здесь нужна иконка под ней
-    			finish();
-    		});
+    		startThumb(thumb_queue.shift());
     	}
     }
 
-    function queueThumb(img, src) {
-    	thumb_queue.push({ img: img, src: src });
+    function startThumb(task) {
+    	var done = false;
+    	// imgLoad при ошибке подставляет свою заглушку, и та потом дёргает onload - считаем задачу один раз
+    	var finish = function () {
+    		if (done) return;
+    		done = true;
+    		thumb_active--;
+    		loadThumbs();
+    	};
+
+    	thumb_active++;
+    	Lampa.Utils.imgLoad(task.img, task.src, function (img) {
+    		img.classList.add('loaded');
+    		if (task.onload) task.onload();
+    		finish();
+    	}, function (img) {
+    		img.style.display = 'none'; // под картинкой остаётся иконка, заглушка imgLoad тут не нужна
+    		finish();
+    	});
+    }
+
+    function queueThumb(img, src, onload) {
+    	thumb_queue.push({ img: img, src: src, onload: onload });
     	loadThumbs();
     }
 
     function addBrowserStyle() {
     	if ($('#dlna-browser-style').length) return;
 
+    	// строка начинается узкой, как раньше; широкой становится, когда загрузилось первое превью
     	$('<style id="dlna-browser-style">'
-    		+ '.dlna-thumb{position:absolute;left:0;top:-0.3em;width:4.2em;height:2.4em;border-radius:0.2em;overflow:hidden;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center}'
+    		+ '.dlna-thumb{position:absolute;left:0;top:-0.3em;width:2.4em;height:2.4em;border-radius:0.2em;overflow:hidden;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;transition:width .2s}'
     		+ '.dlna-thumb svg{width:1.5em;height:1.5em}'
     		+ '.dlna-thumb__img{position:absolute;left:0;top:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .2s}'
     		+ '.dlna-thumb__img.loaded{opacity:1}'
-    		+ '.dlna-thumb__text{padding-left:5em}'
+    		+ '.dlna-item .online__title,.dlna-item .online__quality{padding-left:3.2em;transition:padding-left .2s}'
+    		+ '.dlna-wide .dlna-thumb{width:4.2em}'
+    		+ '.dlna-wide .dlna-item .online__title,.dlna-wide .dlna-item .online__quality{padding-left:5em}'
     		+ '</style>').appendTo('head');
     }
 
@@ -1045,6 +1150,7 @@
     	});
     	var last;
     	var destroyed = false;
+    	var rows = []; // строки списка, чтобы дорисовать в них превью, когда придёт ответ TMDB
 
     	scroll.body().addClass('torrent-list');
 
@@ -1094,19 +1200,10 @@
     		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
     		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
 
-    		// широкий макет с кадрами включаем на весь список, только если превью реально есть,
-    		// иначе строки останутся с прежней узкой иконкой
-    		var all = folders.concat(files);
-    		var with_thumb = all.filter(function (n) { return DLNA.thumb(n); }).length;
-
-    		console.log('DLNA', 'элементов:', all.length, 'с превью:', with_thumb);
-    		if (!with_thumb && files.length) console.log('DLNA', 'сервер миниатюр не дал, поля первого файла:', files[0]);
-
-    		var wide = with_thumb > 0;
-    		if (wide) addBrowserStyle();
+    		addBrowserStyle();
 
     		sort(folders).forEach(function (node) {
-    			_this.appendFolder(node, wide);
+    			_this.appendFolder(node);
     		});
 
     		// плейлист по всем проигрываемым файлам списка - чтобы работал переход к следующему
@@ -1114,13 +1211,15 @@
     		var playable = sorted_files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
 
     		sorted_files.forEach(function (node) {
-    			_this.appendFile(node, playable, wide);
+    			_this.appendFile(node, playable);
     		});
 
     		this.activity.loader(false);
     		resize();
     		this.start(true);
     		this.activity.toggle();
+
+    		this.loadPreviews(); // асинхронно, список уже показан
     	};
 
     	this.sortByTitle = function (list) {
@@ -1138,18 +1237,18 @@
     		});
     	};
 
-    	this.appendFolder = function (node, wide) {
+    	this.appendFolder = function (node) {
     		var descr = [
     			node.childCount ? node.childCount + ' ' + Lampa.Lang.translate('dlna_browser_items') : '',
     			DLNA.viewDate(node.title)
     		].filter(function (v) { return v; }).join(' / ');
 
-    		var item = Lampa.Template.get(wide ? 'dlna_thumb' : 'synology_nas_folder', {
+    		var item = Lampa.Template.get('dlna_thumb', {
     			title: node.title,
     			quality: descr,
     			info: ''
     		});
-    		if (wide) this.thumbBox(item, node, ICON_FOLDER);
+    		this.thumbBox(item, node, ICON_FOLDER, true);
 
     		item.on('hover:enter', function () {
     			Lampa.Activity.push({
@@ -1165,16 +1264,16 @@
     		this.append(item);
     	};
 
-    	this.appendFile = function (node, playlist_source, wide) {
+    	this.appendFile = function (node, playlist_source) {
     		var descr = [DLNA.humanSize(node.size), node.resolution, node.duration ? String(node.duration).split('.')[0] : '']
     			.filter(function (v) { return v; }).join(' / ');
 
-    		var item = Lampa.Template.get(wide ? 'dlna_thumb' : 'synology_nas', {
+    		var item = Lampa.Template.get('dlna_thumb', {
     			title: node.title,
     			quality: descr,
     			info: ''
     		});
-    		if (wide) this.thumbBox(item, node, ICON_PLAY);
+    		this.thumbBox(item, node, ICON_PLAY, false);
     		item.addClass('video--stream');
 
     		var url = node.url ? DLNA.getProxyURL(node.url) : '';
@@ -1230,18 +1329,79 @@
     	};
 
       /**
-       * Кадр-превью в строке: иконка видна сразу, картинка проявляется поверх неё после загрузки
+       * Превью в строке: иконка видна сразу, картинка проявляется поверх неё после загрузки
        */
-    	this.thumbBox = function (item, node, icon) {
+    	this.thumbBox = function (item, node, icon, is_folder) {
     		var box = item.find('.dlna-thumb');
     		box.append(icon);
+    		item.addClass('dlna-item');
 
-    		var src = DLNA.thumb(node);
-    		if (!src) return;
+    		rows.push({ node: node, item: item, box: box, folder: is_folder });
+
+    		this.setThumb(box, DLNA.thumb(node)); // если сервер превью всё-таки отдаёт, оно приоритетнее
+    	};
+
+    	this.setThumb = function (box, src) {
+    		if (!src || box.find('img').length) return;
 
     		var img = $('<img class="dlna-thumb__img" />');
     		box.append(img);
-    		queueThumb(img[0], src);
+
+    		queueThumb(img[0], src, function () {
+    			// первая же загрузившаяся картинка расширяет строки под кадр 16:9
+    			if (!destroyed) scroll.body().addClass('dlna-wide');
+    		});
+    	};
+
+      /**
+       * Постеры папок, кадры и названия серий из TMDB - локальный сервер их не отдаёт
+       */
+    	this.loadPreviews = async function () {
+    		var ctx = object.folder_title || object.root_title || '';
+    		var show = ctx ? await TMDB.match(ctx) : null; // внутри папки сериала хватает одного сопоставления
+    		if (destroyed) return;
+
+    		var seasons = {};
+    		var lookups = 0;
+
+    		for (var i = 0; i < rows.length; i++) {
+    			var row = rows[i];
+    			if (destroyed) return;
+    			if (row.box.find('img').length) continue; // превью уже дал сервер
+
+    			var src = '';
+
+    			if (!row.folder && show) {
+    				var se = DLNA.episode(row.node);
+
+    				if (show.type === 'tv' && se) {
+    					var key = show.id + '_' + se.season;
+    					if (!seasons[key]) seasons[key] = await TMDB.season(show.id, se.season);
+    					if (destroyed) return;
+
+    					var episode = seasons[key][se.episode];
+    					if (episode) {
+    						src = TMDB.image(episode.still, 'w300');
+    						if (episode.name) {
+    							row.item.find('.online__title').text('S' + se.season + 'E' + se.episode + ' · ' + episode.name);
+    						}
+    					}
+    				} else if (show.type === 'movie') {
+    					src = TMDB.image(show.poster, 'w300');
+    				}
+    			}
+
+    			if (!src) {
+    				if (lookups >= TMDB_MAX_LOOKUP) continue; // на пёстрой папке не устраиваем шквал поиска
+    				lookups++;
+
+    				var match = await TMDB.match(row.node.title);
+    				if (destroyed) return;
+    				if (match) src = TMDB.image(match.poster, 'w300');
+    			}
+
+    			this.setThumb(row.box, src);
+    		}
     	};
 
     	this.append = function (item) {
@@ -1299,7 +1459,9 @@
     	this.stop = function () {};
     	this.destroy = function () {
     		destroyed = true;
+    		rows = [];
     		thumb_queue = []; // недогруженные превью закрытой страницы уже не нужны
+    		if (TMDB.net) TMDB.net.clear();
     		window.removeEventListener('resize', resize);
     		scroll.destroy();
     	};
@@ -1393,7 +1555,7 @@
     	Lampa.Template.add('synology_nas_folder', "<div class=\"online selector\">\n        <div class=\"online__body\">\n            <div style=\"position: absolute;left: 0;top: -0.3em;width: 2.4em;height: 2.4em\">\n                <svg style=\"height: 2.4em; width:  2.4em;\" viewBox=\"0 0 128 112\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">\n                    <rect y=\"20\" width=\"128\" height=\"92\" rx=\"13\" fill=\"white\"/>\n                    <path d=\"M29.9963 8H98.0037C96.0446 3.3021 91.4079 0 86 0H42C36.5921 0 31.9555 3.3021 29.9963 8Z\" fill=\"white\" fill-opacity=\"0.23\"/>\n                    <rect x=\"11\" y=\"8\" width=\"106\" height=\"76\" rx=\"13\" fill=\"white\" fill-opacity=\"0.51\"/>\n                </svg>\n            </div>\n            <div class=\"online__title\" style=\"padding-left: 2.1em;\">{title}</div>\n            <div class=\"online__quality\" style=\"padding-left: 3.4em;\">{quality}{info}</div>\n        </div>\n    </div>");
 
     	// вариант с кадром-превью: используется, только если сервер отдал миниатюры
-    	Lampa.Template.add('dlna_thumb', "<div class=\"online selector\">\n        <div class=\"online__body\">\n            <div class=\"dlna-thumb\"></div>\n            <div class=\"online__title dlna-thumb__text\">{title}</div>\n            <div class=\"online__quality dlna-thumb__text\">{quality}{info}</div>\n        </div>\n    </div>");
+    	Lampa.Template.add('dlna_thumb', "<div class=\"online selector\">\n        <div class=\"online__body\">\n            <div class=\"dlna-thumb\"></div>\n            <div class=\"online__title\">{title}</div>\n            <div class=\"online__quality\">{quality}{info}</div>\n        </div>\n    </div>");
     }
     var button = "<div class=\"full-start__button selector view--online\" data-subtitle=\"v0.0.2\">\n    <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:svgjs=\"http://svgjs.com/svgjs\" version=\"1.1\" width=\"512\" height=\"512\" x=\"0\" y=\"0\" viewBox=\"0 0 30.051 30.051\" style=\"enable-background:new 0 0 512 512\" xml:space=\"preserve\" class=\"\">\n    <g xmlns=\"http://www.w3.org/2000/svg\">\n        <path d=\"M19.982,14.438l-6.24-4.536c-0.229-0.166-0.533-0.191-0.784-0.062c-0.253,0.128-0.411,0.388-0.411,0.669v9.069   c0,0.284,0.158,0.543,0.411,0.671c0.107,0.054,0.224,0.081,0.342,0.081c0.154,0,0.31-0.049,0.442-0.146l6.24-4.532   c0.197-0.145,0.312-0.369,0.312-0.607C20.295,14.803,20.177,14.58,19.982,14.438z\" fill=\"currentColor\"/>\n        <path d=\"M15.026,0.002C6.726,0.002,0,6.728,0,15.028c0,8.297,6.726,15.021,15.026,15.021c8.298,0,15.025-6.725,15.025-15.021   C30.052,6.728,23.324,0.002,15.026,0.002z M15.026,27.542c-6.912,0-12.516-5.601-12.516-12.514c0-6.91,5.604-12.518,12.516-12.518   c6.911,0,12.514,5.607,12.514,12.518C27.541,21.941,21.937,27.542,15.026,27.542z\" fill=\"currentColor\"/>\n    </g></svg>\n\n    <span>#{synology_nas_title}</span>\n    </div>";
 
