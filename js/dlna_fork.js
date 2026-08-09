@@ -18,6 +18,10 @@
 	var MAX_DEPTH   = 2;   // на сколько уровней вложенности спускаться
 	var MAX_FOLDERS = 40;  // предохранитель от обхода всей библиотеки
 
+	var BROWSER_ROOT  = 'Video'; // с какой папки сервера начинается страница DLNA
+	var TREE_DEPTH    = 4;       // глубина сбора дерева для главной страницы
+	var TREE_MAX_NODE = 100;     // сколько папок максимум обходим за один уровень
+
 	var CONTROL_PATHS = [
 		'ctl/ContentDir',                        // MiniDLNA (Keenetic, OpenWrt, ReadyMedia)
 		'ContentDirectory/control',              // Synology DSM
@@ -166,6 +170,114 @@
 
 		isAudio: function (node) {
 			return (node.type || '').indexOf('object.item.audioItem') === 0;
+		},
+
+		/**
+		 * ObjectID папки по её пути от корня, например 'Video' или 'Video/Folders'
+		 * @returns {String|null} null - такой папки на сервере нет
+		 */
+		resolvePath: async function (path) {
+			var id = '0';
+			var parts = (path || '').replace(/^\/+|\/+$/g, '').split('/').filter(function (p) { return p; });
+
+			for (var i = 0; i < parts.length; i++) {
+				var nodes = await DLNA.browse(id);
+				var want = parts[i].toLowerCase();
+				var found = nodes.filter(DLNA.isFolder).filter(function (n) {
+					return (n.title || '').toLowerCase() === want;
+				})[0];
+
+				if (!found) return null;
+				id = found.id;
+			}
+			return id;
+		},
+
+		/**
+		 * Собрать содержимое ветки: папки с видео и отдельные файлы, лежащие по пути
+		 *
+		 * Обход идёт по уровням (все запросы уровня - параллельно). Папка, у которой
+		 * нет подпапок, становится карточкой; папка с подпапками "прозрачная" -
+		 * её файлы поднимаются наверх, а подпапки обходятся дальше. Так виртуальные
+		 * разделы DLNA (Video / Folders / ...) не мешают увидеть реальную библиотеку.
+		 */
+		collect: async function (start_id, depth) {
+			var folders = [], files = [];
+			var seen_folder = {}, seen_file = {};
+
+			var addFolder = function (node, count) {
+				var key = (node.title || '').toLowerCase();
+				if (!key || seen_folder[key]) return;
+				seen_folder[key] = true;
+				if (!node.childCount && count) node.childCount = count;
+				folders.push(node);
+			};
+			var addFile = function (node) {
+				var key = (node.title || '').toLowerCase();
+				if (!key || seen_file[key]) return;
+				seen_file[key] = true;
+				files.push(node);
+			};
+
+			var queue = [{ id: start_id, node: null }]; // node null - стартовая папка, всегда прозрачная
+
+			for (var d = 0; d < depth && queue.length; d++) {
+				var lists = await Promise.all(queue.map(function (entry) { return DLNA.browse(entry.id); }));
+				var next = [];
+
+				queue.forEach(function (entry, i) {
+					var nodes = lists[i] || [];
+					var subs = nodes.filter(DLNA.isFolder);
+					var vids = nodes.filter(DLNA.isVideo);
+
+					if (entry.node && !subs.length) {
+						if (vids.length) addFolder(entry.node, vids.length); // конечная папка с видео
+						return;
+					}
+
+					vids.forEach(addFile);
+					subs.forEach(function (sub) { next.push({ id: sub.id, node: sub }); });
+				});
+
+				// слишком широкое дерево - дальше не идём, показываем как есть
+				if (next.length > TREE_MAX_NODE) {
+					next.forEach(function (entry) { addFolder(entry.node); });
+					next = [];
+				}
+				queue = next;
+			}
+
+			// упёрлись в ограничение глубины - остаток показываем папками
+			queue.forEach(function (entry) { addFolder(entry.node); });
+
+			return { folders: folders, files: files };
+		},
+
+		/**
+		 * Когда файл/папку смотрели в последний раз
+		 */
+		viewTimes: function () {
+			return Lampa.Storage.cache('dlna_view_time', 500, {});
+		},
+
+		markView: function () {
+			var times = DLNA.viewTimes();
+			var now = Date.now();
+			for (var i = 0; i < arguments.length; i++) {
+				if (arguments[i]) times[String(arguments[i]).toLowerCase()] = now;
+			}
+			Lampa.Storage.set('dlna_view_time', times);
+		},
+
+		viewTime: function (key) {
+			return key ? (DLNA.viewTimes()[String(key).toLowerCase()] || 0) : 0;
+		},
+
+		viewDate: function (key) {
+			var time = DLNA.viewTime(key);
+			if (!time) return '';
+			var d = new Date(time);
+			return ('0' + d.getDate()).slice(-2) + '.' + ('0' + (d.getMonth() + 1)).slice(-2) + '.' + d.getFullYear();
 		},
 
 		humanSize: function (bytes) {
@@ -750,8 +862,11 @@
     }
 
     /**
-     * Отдельная страница: обзор всего содержимого DLNA-сервера
-     * object.folder_id - ObjectID папки на сервере ('0' - корень)
+     * Отдельная страница: обзор DLNA-сервера
+     *
+     * Без folder_id - главная страница: собирает папки и отдельные файлы
+     * из ветки BROWSER_ROOT и сортирует их по дате последнего просмотра.
+     * С folder_id - обычный список содержимого папки.
      */
     function browser(object) {
     	var scroll = new Lampa.Scroll({
@@ -763,64 +878,104 @@
 
     	scroll.body().addClass('torrent-list');
 
+    	function resize() {
+    		if (Lampa.Layer && Lampa.Layer.update) Lampa.Layer.update(scroll.render());
+    	}
+
     	this.create = function () {
+    		scroll.minus(); // без этого у скролла нет высоты и список не прокручивается
+    		window.addEventListener('resize', resize, false);
     		this.activity.loader(true);
     		this.build();
     		return this.render();
     	};
 
       /**
-       * Загрузить и показать содержимое папки
+       * Загрузить и показать содержимое
        */
     	this.build = async function () {
-    		var _this = this;
-    		var nodes;
+    		var folders = [], files = [];
 
     		try {
-    			nodes = await DLNA.browse(object.folder_id || '0');
+    			if (object.folder_id) {
+    				var nodes = await DLNA.browse(object.folder_id);
+    				folders = nodes.filter(DLNA.isFolder);
+    				files = nodes.filter(function (n) { return !DLNA.isFolder(n); });
+    			} else {
+    				var root = Lampa.Storage.get('dlna_browser_root', BROWSER_ROOT);
+    				var root_id = await DLNA.resolvePath(root);
+
+    				if (root_id === null) {
+    					Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_noroot') + ': ' + root);
+    					root_id = '0';
+    				}
+    				var tree = await DLNA.collect(root_id, TREE_DEPTH);
+    				folders = tree.folders;
+    				files = tree.files;
+    			}
     		} catch (e) {
     			console.error('DLNA', 'browse', e);
-    			nodes = [];
     		}
 
     		if (destroyed) return;
-
-    		var byTitle = function (a, b) {
-    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
-    		};
-    		var folders = nodes.filter(DLNA.isFolder).sort(byTitle);
-    		var files = nodes.filter(function (n) { return !DLNA.isFolder(n); }).sort(byTitle);
-
     		if (!folders.length && !files.length) return this.empty();
 
-    		folders.forEach(function (node) {
+    		var _this = this;
+    		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
+    		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
+
+    		sort(folders).forEach(function (node) {
     			_this.appendFolder(node);
     		});
 
-    		// плейлист по всем проигрываемым файлам папки - чтобы работал переход к следующему
-    		var playable = files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
+    		// плейлист по всем проигрываемым файлам списка - чтобы работал переход к следующему
+    		var sorted_files = sort(files);
+    		var playable = sorted_files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
 
-    		files.forEach(function (node) {
+    		sorted_files.forEach(function (node) {
     			_this.appendFile(node, playable);
     		});
 
     		this.activity.loader(false);
+    		resize();
     		this.start(true);
     		this.activity.toggle();
     	};
 
+    	this.sortByTitle = function (list) {
+    		return list.slice().sort(function (a, b) {
+    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    		});
+    	};
+
+    	this.sortByView = function (list) {
+    		return list.slice().sort(function (a, b) {
+    			var ta = DLNA.viewTime(a.title);
+    			var tb = DLNA.viewTime(b.title);
+    			if (ta !== tb) return tb - ta; // непросмотренные (0) уходят вниз и там сортируются по имени
+    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    		});
+    	};
+
     	this.appendFolder = function (node) {
+    		var descr = [
+    			node.childCount ? node.childCount + ' ' + Lampa.Lang.translate('dlna_browser_items') : '',
+    			DLNA.viewDate(node.title)
+    		].filter(function (v) { return v; }).join(' / ');
+
     		var item = Lampa.Template.get('synology_nas_folder', {
     			title: node.title,
-    			quality: node.childCount ? node.childCount + ' ' + Lampa.Lang.translate('dlna_browser_items') : '',
+    			quality: descr,
     			info: ''
     		});
     		item.on('hover:enter', function () {
     			Lampa.Activity.push({
     				url: '',
-    				title: node.title || Lampa.Lang.translate('synology_nas_title'),
+    				title: node.title || Lampa.Lang.translate('dlna_browser_title'),
     				component: 'dlna_browser',
     				folder_id: node.id,
+    				folder_title: node.title,
+    				root_title: object.root_title || node.title, // папка, через которую вошли с главной
     				page: 1
     			});
     		});
@@ -870,6 +1025,9 @@
     			Lampa.Player.play(first);
     			Lampa.Player.playlist(playlist.length ? playlist : [first]);
 
+    			// отметка времени просмотра: по ней сортируется главная страница
+    			DLNA.markView(node.title, object.folder_title, object.root_title);
+
     			if (viewed.indexOf(hash) == -1) {
     				viewed.push(hash);
     				item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
@@ -892,6 +1050,7 @@
     		empty.find('.empty__descr').text(Lampa.Lang.translate('dlna_browser_empty'));
     		scroll.append(empty);
     		this.activity.loader(false);
+    		resize();
     		this.start(true);
     		this.activity.toggle();
     	};
@@ -933,6 +1092,7 @@
     	this.stop = function () {};
     	this.destroy = function () {
     		destroyed = true;
+    		window.removeEventListener('resize', resize);
     		scroll.destroy();
     	};
     }
@@ -1005,6 +1165,13 @@
     		zh: '文件夹为空或服务器不可用',
     		bg: 'Папката е празна или сървърът е недостъпен'
     	},
+    	dlna_browser_noroot: {
+    		ru: 'Папка не найдена, открыт корень сервера',
+    		uk: 'Папку не знайдено, відкрито корінь сервера',
+    		en: 'Folder not found, opening server root',
+    		zh: '未找到文件夹，打开服务器根目录',
+    		bg: 'Папката не е намерена, отворен е коренът на сървъра'
+    	},
     	dlna_browser_cantplay: {
     		ru: 'Этот файл нельзя воспроизвести',
     		uk: 'Цей файл неможливо відтворити',
@@ -1044,7 +1211,6 @@
     			url: '',
     			title: Lampa.Lang.translate('dlna_browser_title'),
     			component: 'dlna_browser',
-    			folder_id: '0',
     			page: 1
     		});
     	});
@@ -1115,6 +1281,20 @@
     		description: 'Например, Video/All Video. Пусто = корень сервера'
     	}
     });    
+    Lampa.SettingsApi.addParam({
+    	component: 'synology_nas_config',
+    	param: {
+    		name: 'dlna_browser_root',
+    		type: 'input',
+    		placeholder: BROWSER_ROOT,
+    		values: '',
+    	default: BROWSER_ROOT
+    	},
+    	field: {
+    		name: 'Стартовая папка страницы DLNA',
+    		description: 'С какой ветки сервера собирать библиотеку. По умолчанию Video'
+    	}
+    });
     Lampa.SettingsApi.addParam({
     	component: 'synology_nas_config',
     	param: {
