@@ -181,12 +181,69 @@
 		 * Путь ресурса от раздела не зависит.
 		 */
 		fileKey: function (node) {
-			var path = (node.url || '').replace(/^[a-z]+:\/\/[^\/]+/i, '');
+			var path = (node.url || node.path || '').replace(/^[a-z]+:\/\/[^\/]+/i, '');
 			return path || node.title || '';
 		},
 
 		fileHash: function (node) {
 			return Lampa.Utils.hash(DLNA.fileKey(node));
+		},
+
+		/**
+		 * Один файл живёт под разными ключами: страница DLNA считает хеш по пути
+		 * ресурса, а карточка фильма - по сезону/серии/original_title (так прогресс
+		 * общий с другими онлайн-балансерами). Оба ключа знает только карточка,
+		 * поэтому она их связывает, а дальше прогресс переносится в обе стороны.
+		 */
+		linkHash: function (file_hash, timeline_hash, viewed_hash) {
+			if (!file_hash || !timeline_hash) return;
+
+			var links = Lampa.Storage.cache('dlna_hash_link', 1000, {});
+			var cur = links[file_hash];
+			if (cur && cur.t === timeline_hash && cur.v === viewed_hash) return;
+
+			links[file_hash] = { t: timeline_hash, v: viewed_hash };
+			Lampa.Storage.set('dlna_hash_link', links);
+		},
+
+		linkedHash: function (file_hash) {
+			return file_hash ? (Lampa.Storage.cache('dlna_hash_link', 1000, {})[file_hash] || null) : null;
+		},
+
+		/**
+		 * Перенести прогресс на тот ключ, где он старее
+		 */
+		syncTimeline: function (hash_a, hash_b) {
+			if (!hash_a || !hash_b || hash_a === hash_b) return;
+
+			var a = Lampa.Timeline.view(hash_a);
+			var b = Lampa.Timeline.view(hash_b);
+			var from = (a.updated || 0) >= (b.updated || 0) ? a : b;
+			var to = from === a ? b : a;
+
+			if (!from.updated) return;
+			// одинаковые данные не переписываем, иначе каждый рендер дёргает хранилище
+			if (to.time === from.time && to.percent === from.percent && to.duration === from.duration) return;
+
+			to.percent = from.percent;
+			to.time = from.time;
+			to.duration = from.duration;
+			Lampa.Timeline.update(to);
+		},
+
+		/**
+		 * Отметка "просмотрено" (звёздочка) - общая для обоих ключей
+		 */
+		syncViewed: function (hash_a, hash_b) {
+			if (!hash_a || !hash_b || hash_a === hash_b) return;
+
+			var viewed = Lampa.Storage.cache('online_view', 5000, []);
+			var has_a = viewed.indexOf(hash_a) !== -1;
+			var has_b = viewed.indexOf(hash_b) !== -1;
+			if (has_a === has_b) return;
+
+			viewed.push(has_a ? hash_b : hash_a);
+			Lampa.Storage.set('online_view', viewed);
 		},
 
 		/**
@@ -484,6 +541,7 @@
 						title: item.title,
 						quality: item.resolution,
 						link: this.getProxyURL(item.url),
+						path: item.url, // без прокси: по нему считается общий с браузером ключ
 						translation: item.title,
 						season: se ? se.season : undefined,
 						episode: se ? se.episode : undefined
@@ -607,9 +665,10 @@
       	results.player_links.movie.forEach((movie, index) => {
 					const id = (index + 1).toString(); // convert index to string for keys
 					filtred.push({
-						title: movie.translation, 
+						title: movie.translation,
 						translation: id,
 						quality: movie.quality,
+						path: movie.path,
 						season: movie.season,
 						episode: movie.episode
 					});
@@ -637,9 +696,19 @@
       			element.translate_voice = VOICE;
       		}
       		var hash = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title].join('') : object.movie.original_title + element.title); // + title: иначе все файлы карточки делят один таймкод
+      		var hash_file = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title, VOICE].join('') : object.movie.original_title + element.title);
+      		var hash_path = element.path ? DLNA.fileHash(element) : ''; // ключ того же файла на странице DLNA
+
+      		if (hash_path) {
+      			// карточка - единственное место, где известны оба ключа одного файла
+      			DLNA.linkHash(hash_path, hash, hash_file);
+      			DLNA.syncTimeline(hash, hash_path);
+      			DLNA.syncViewed(hash_file, hash_path);
+      			viewed = Lampa.Storage.cache('online_view', 5000, []);
+      		}
+
       		var view = Lampa.Timeline.view(hash);
       		var item = Lampa.Template.get('synology_nas', element);
-      		var hash_file = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title, VOICE].join('') : object.movie.original_title + element.title);
       		item.addClass('video--stream');
       		element.timeline = view;
       		item.append(Lampa.Timeline.render(view));
@@ -683,6 +752,7 @@
       					item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       					Lampa.Storage.set('online_view', viewed);
       				}
+      				DLNA.syncViewed(hash_file, hash_path);
       			} else Lampa.Noty.show(Lampa.Lang.translate('online_nolink'));
       		});
       		component.append(item);
@@ -1012,8 +1082,15 @@
 
     		var url = node.url ? DLNA.getProxyURL(node.url) : '';
     		var can_play = (DLNA.isVideo(node) || DLNA.isAudio(node)) && url;
-    		var viewed = Lampa.Storage.cache('online_view', 5000, []);
     		var hash = DLNA.fileHash(node);
+    		var link = DLNA.linkedHash(hash); // ключи этого же файла на карточке фильма, если он там открывался
+
+    		if (link) {
+    			DLNA.syncTimeline(hash, link.t);
+    			DLNA.syncViewed(hash, link.v);
+    		}
+
+    		var viewed = Lampa.Storage.cache('online_view', 5000, []);
     		var view = Lampa.Timeline.view(hash);
 
     		if (DLNA.isVideo(node)) {
@@ -1050,6 +1127,7 @@
     				item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     				Lampa.Storage.set('online_view', viewed);
     			}
+    			if (link) DLNA.syncViewed(hash, link.v);
     		});
     		this.append(item);
     	};
