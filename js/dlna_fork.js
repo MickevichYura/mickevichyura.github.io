@@ -475,24 +475,29 @@
 		},
 
 		/**
-		 * Кадры и названия всех серий сезона - одним запросом
+		 * Кадры, названия, рейтинг и даты всех серий сезона - одним запросом
 		 */
 		season: async function (id, season) {
 			var key = id + '_' + season;
 
-			var cache = Lampa.Storage.cache('dlna_tmdb_season', 200, {});
+			var cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
 			if (cache[key]) return cache[key];
 
 			var json = await TMDB.request('tv/' + id + '/season/' + season + '?' + TMDB.params());
 			var episodes = {};
 
 			if (json && json.episodes) json.episodes.forEach(function (e) {
-				episodes[e.episode_number] = { still: e.still_path || '', name: e.name || '' };
+				episodes[e.episode_number] = {
+					still: e.still_path || '',
+					name: e.name || '',
+					rating: e.vote_average || 0,
+					date: e.air_date || ''
+				};
 			});
 
-			cache = Lampa.Storage.cache('dlna_tmdb_season', 200, {});
+			cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
 			cache[key] = episodes;
-			Lampa.Storage.set('dlna_tmdb_season', cache);
+			Lampa.Storage.set('dlna_tmdb_episodes', cache);
 
 			return episodes;
 		}
@@ -503,6 +508,7 @@
 		var extract = {};
 		var results = [];
 		var object = _object;
+		var episodes = {}; // серии по сезонам из TMDB для этой карточки
 		var filter_items = {};
 		var choice = {
 			season: 0,
@@ -638,7 +644,7 @@
 			    	}
 			    }
 			    var collected = await _this.collectRecursive(filesAndDirectories, MAX_DEPTH);
-			    _this.processFilesAndDirectories(collected, search_zero, search_one, search_two);
+			    await _this.processFilesAndDirectories(collected, search_zero, search_one, search_two);
 			  }			
 
       /**
@@ -660,7 +666,7 @@
       /**
        * Обработка списка папок и файлов, формирование списка видеофайлов для отображения в Лампе
        */
-			  this.processFilesAndDirectories = function(filesAndDirectories, search_zero, search_one, search_two) {
+			  this.processFilesAndDirectories = async function(filesAndDirectories, search_zero, search_one, search_two) {
 				// console.log('Synology NAS', 'processFilesAndDirectories', filesAndDirectories);
 
 				const videoItems = filesAndDirectories.filter(item => (item.type || '').indexOf('object.item.videoItem') === 0); // берем только видеофайлы
@@ -676,17 +682,39 @@
 						quality: item.resolution,
 						link: this.getProxyURL(item.url),
 						path: item.url, // без прокси: по нему считается общий с браузером ключ
+						size: item.size,
+						duration: item.duration,
 						translation: item.title,
 						season: se ? se.season : undefined,
 						episode: se ? se.episode : undefined
 					};
 				});
 
+				// серии карточки: id сериала известен из неё самой, искать по имени не нужно
+				await this.loadEpisodes(results.player_links.movie);
+
 				extractData(results);
 				append(filtred());
 
-				component.loading(false);  				        	
+				component.loading(false);
 			}
+
+      /**
+       * Кадры, названия, рейтинг и даты серий для файлов этой карточки
+       */
+			this.loadEpisodes = async function (movies) {
+				var movie = object.movie || {};
+				var is_tv = !!(movie.number_of_seasons || movie.first_air_date || (movie.name && !movie.title));
+				if (!movie.id || !is_tv) return;
+
+				var need = {};
+				movies.forEach(function (m) { if (m.season) need[m.season] = true; });
+
+				var list = Object.keys(need).slice(0, 5);
+				for (var i = 0; i < list.length; i++) {
+					episodes[list[i]] = await TMDB.season(movie.id, list[i]);
+				}
+			};
 
 			this.soapBrowse = DLNA.soapBrowse;
 
@@ -803,6 +831,8 @@
 						translation: id,
 						quality: movie.quality,
 						path: movie.path,
+						size: movie.size,
+						duration: movie.duration,
 						season: movie.season,
 						episode: movie.episode
 					});
@@ -842,14 +872,32 @@
       		}
 
       		var view = Lampa.Timeline.view(hash);
-      		var item = Lampa.Template.get('synology_nas', element);
-      		item.addClass('video--stream');
       		element.timeline = view;
-      		item.append(Lampa.Timeline.render(view));
-      		if (Lampa.Timeline.details) {
-      			item.find('.online__quality').append(Lampa.Timeline.details(view, ' / '));
+
+      		var ep = element.season && episodes[element.season] ? episodes[element.season][element.episode] : null;
+      		var item;
+
+      		if (ep) {
+      			item = buildEpisodeItem({
+      				number: element.episode,
+      				title: ep.name || element.title,
+      				still: TMDB.image(ep.still, 'w300'),
+      				rating: ep.rating,
+      				date: ep.date,
+      				time: element.duration ? String(element.duration).split('.')[0] : '',
+      				quality: element.quality,
+      				size: DLNA.humanSize(element.size),
+      				timeline: view
+      			});
+      		} else {
+      			item = Lampa.Template.get('synology_nas', element);
+      			item.addClass('video--stream');
+      			item.append(Lampa.Timeline.render(view));
+      			if (Lampa.Timeline.details) {
+      				item.find('.online__quality').append(Lampa.Timeline.details(view, ' / '));
+      			}
+      			if (viewed.indexOf(hash_file) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       		}
-      		if (viewed.indexOf(hash_file) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       		item.on('hover:enter', function () {
       			if (object.movie.id) Lampa.Favorite.add('history', object.movie, 100);
             // console.log('Synology NAS', 'hover:enter', element);
@@ -883,7 +931,8 @@
       				Lampa.Player.playlist(playlist);
       				if (viewed.indexOf(hash_file) == -1) {
       					viewed.push(hash_file);
-      					item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
+      					// у нативной строки серии роль отметки играет полоса прогресса
+      					if (!ep) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       					Lampa.Storage.set('online_view', viewed);
       				}
       				DLNA.syncViewed(hash_file, hash_path);
@@ -1121,6 +1170,52 @@
     	loadThumbs();
     }
 
+    function dateHuman(date) {
+    	if (!date) return '';
+    	var parsed = Lampa.Utils.parseTime ? Lampa.Utils.parseTime(date) : null;
+    	return (parsed && parsed.full) ? parsed.full : date;
+    }
+
+    /**
+     * Строка в нативном стиле серии: кадр с номером слева, название, таймлайн, рейтинг и дата
+     *
+     * Используется и на странице DLNA, и в списке DLNA на карточке сериала,
+     * поэтому берём шаблон ядра - вид совпадает со штатным списком серий.
+     *
+     * @param {Object} data {number, title, still, rating, date, time, quality, size, timeline}
+     */
+    function buildEpisodeItem(data) {
+    	addBrowserStyle(); // строка используется и на карточке, где стили ещё не подключены
+
+    	var item = Lampa.Template.get('season_episode', {
+    		title: data.title || '',
+    		time: data.time || '',
+    		info: '',
+    		quality: data.quality || ''
+    	});
+
+    	var box = item.find('.season-episode__img');
+    	box.find('.season-episode__loader').remove(); // картинки грузим своей очередью
+    	box.append('<div class="season-episode__episode-number">' + ('0' + data.number).slice(-2) + '</div>');
+
+    	if (data.still) {
+    		queueThumb(box.find('img')[0], data.still, function () {
+    			box.addClass('season-episode__img--loaded');
+    		});
+    	}
+
+    	var info = [];
+    	if (data.rating) info.push('★ ' + parseFloat(data.rating).toFixed(1));
+    	if (data.date) info.push(dateHuman(data.date));
+    	if (data.size) info.push(data.size);
+    	item.find('.season-episode__info').html(info.join('<span class="season-episode-split">●</span>'));
+
+    	// прогресс просмотра заменяет звёздочку - как в штатном списке серий
+    	if (data.timeline) item.find('.season-episode__timeline').append(Lampa.Timeline.render(data.timeline));
+
+    	return item;
+    }
+
     function addBrowserStyle() {
     	if ($('#dlna-browser-style').length) return;
 
@@ -1133,6 +1228,7 @@
     		+ '.dlna-item .online__title,.dlna-item .online__quality{padding-left:3.2em;transition:padding-left .2s}'
     		+ '.dlna-wide .dlna-thumb{width:4.2em}'
     		+ '.dlna-wide .dlna-item .online__title,.dlna-wide .dlna-item .online__quality{padding-left:5em}'
+    		+ '.season-episode-split{margin:0 0.6em}'
     		+ '</style>').appendTo('head');
     }
 
@@ -1150,7 +1246,9 @@
     	});
     	var last;
     	var destroyed = false;
-    	var rows = []; // строки списка, чтобы дорисовать в них превью, когда придёт ответ TMDB
+    	var rows = [];     // компактные строки, чтобы дорисовать в них превью, когда придёт ответ TMDB
+    	var show = null;   // сериал/фильм, с которым сопоставлена текущая папка
+    	var seasons = {};  // серии по сезонам из TMDB
 
     	scroll.body().addClass('torrent-list');
 
@@ -1196,6 +1294,10 @@
     		if (destroyed) return;
     		if (!folders.length && !files.length) return this.empty();
 
+    		// сопоставляем папку с сериалом до отрисовки: иначе строки перестроятся уже на глазах
+    		if (object.folder_id && files.length) await this.matchShow(files);
+    		if (destroyed) return;
+
     		var _this = this;
     		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
     		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
@@ -1220,6 +1322,42 @@
     		this.activity.toggle();
 
     		this.loadPreviews(); // асинхронно, список уже показан
+    	};
+
+      /**
+       * Сопоставить папку с сериалом и подтянуть серии тех сезонов, что реально лежат в папке
+       */
+    	this.matchShow = async function (files) {
+    		var ctx = object.folder_title || object.root_title || '';
+    		if (!ctx) return;
+
+    		show = await TMDB.match(ctx);
+    		if (destroyed || !show || show.type !== 'tv') return;
+
+    		var need = {};
+    		files.forEach(function (node) {
+    			var se = DLNA.episode(node);
+    			if (se) need[se.season] = true;
+    		});
+
+    		var list = Object.keys(need).slice(0, 5); // папка со всеми сезонами сразу не должна тормозить открытие
+    		for (var i = 0; i < list.length; i++) {
+    			seasons[list[i]] = await TMDB.season(show.id, list[i]);
+    			if (destroyed) return;
+    		}
+    	};
+
+      /**
+       * Данные серии из TMDB для файла, если папка сопоставилась с сериалом
+       */
+    	this.episodeInfo = function (node) {
+    		if (!show || show.type !== 'tv') return null;
+
+    		var se = DLNA.episode(node);
+    		if (!se) return null;
+
+    		var data = seasons[se.season] && seasons[se.season][se.episode];
+    		return data ? { season: se.season, number: se.episode, data: data } : null;
     	};
 
     	this.sortByTitle = function (list) {
@@ -1265,16 +1403,9 @@
     	};
 
     	this.appendFile = function (node, playlist_source) {
-    		var descr = [DLNA.humanSize(node.size), node.resolution, node.duration ? String(node.duration).split('.')[0] : '']
-    			.filter(function (v) { return v; }).join(' / ');
-
-    		var item = Lampa.Template.get('dlna_thumb', {
-    			title: node.title,
-    			quality: descr,
-    			info: ''
-    		});
-    		this.thumbBox(item, node, ICON_PLAY, false);
-    		item.addClass('video--stream');
+    		var size = DLNA.humanSize(node.size);
+    		var duration = node.duration ? String(node.duration).split('.')[0] : '';
+    		var descr = [size, node.resolution, duration].filter(function (v) { return v; }).join(' / ');
 
     		var url = node.url ? DLNA.getProxyURL(node.url) : '';
     		var can_play = (DLNA.isVideo(node) || DLNA.isAudio(node)) && url;
@@ -1288,12 +1419,36 @@
 
     		var viewed = Lampa.Storage.cache('online_view', 5000, []);
     		var view = Lampa.Timeline.view(hash);
+    		var episode = this.episodeInfo(node);
+    		var item;
 
-    		if (DLNA.isVideo(node)) {
-    			item.append(Lampa.Timeline.render(view));
-    			if (Lampa.Timeline.details) item.find('.online__quality').append(Lampa.Timeline.details(view, ' / '));
+    		if (episode) {
+    			item = buildEpisodeItem({
+    				number: episode.number,
+    				title: episode.data.name || node.title,
+    				still: TMDB.image(episode.data.still, 'w300'),
+    				rating: episode.data.rating,
+    				date: episode.data.date,
+    				time: duration,
+    				quality: node.resolution,
+    				size: size,
+    				timeline: view
+    			});
+    		} else {
+    			item = Lampa.Template.get('dlna_thumb', {
+    				title: node.title,
+    				quality: descr,
+    				info: ''
+    			});
+    			this.thumbBox(item, node, ICON_PLAY, false);
+    			item.addClass('video--stream');
+
+    			if (DLNA.isVideo(node)) {
+    				item.append(Lampa.Timeline.render(view));
+    				if (Lampa.Timeline.details) item.find('.online__quality').append(Lampa.Timeline.details(view, ' / '));
+    			}
+    			if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     		}
-    		if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
 
     		item.on('hover:enter', function () {
     			if (!can_play) return Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_cantplay'));
@@ -1320,7 +1475,8 @@
 
     			if (viewed.indexOf(hash) == -1) {
     				viewed.push(hash);
-    				item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
+    				// у нативной строки серии роль отметки играет полоса прогресса
+    				if (!episode) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     				Lampa.Storage.set('online_view', viewed);
     			}
     			if (link) DLNA.syncViewed(hash, link.v);
@@ -1357,13 +1513,9 @@
        * Постеры папок, кадры и названия серий из TMDB - локальный сервер их не отдаёт
        */
     	this.loadPreviews = async function () {
-    		var ctx = object.folder_title || object.root_title || '';
-    		var show = ctx ? await TMDB.match(ctx) : null; // внутри папки сериала хватает одного сопоставления
-    		if (destroyed) return;
-
-    		var seasons = {};
     		var lookups = 0;
 
+    		// строки, для которых нативный вид серии не подошёл: папки и несопоставленные файлы
     		for (var i = 0; i < rows.length; i++) {
     			var row = rows[i];
     			if (destroyed) return;
@@ -1371,25 +1523,8 @@
 
     			var src = '';
 
-    			if (!row.folder && show) {
-    				var se = DLNA.episode(row.node);
-
-    				if (show.type === 'tv' && se) {
-    					var key = show.id + '_' + se.season;
-    					if (!seasons[key]) seasons[key] = await TMDB.season(show.id, se.season);
-    					if (destroyed) return;
-
-    					var episode = seasons[key][se.episode];
-    					if (episode) {
-    						src = TMDB.image(episode.still, 'w300');
-    						if (episode.name) {
-    							row.item.find('.online__title').text('S' + se.season + 'E' + se.episode + ' · ' + episode.name);
-    						}
-    					}
-    				} else if (show.type === 'movie') {
-    					src = TMDB.image(show.poster, 'w300');
-    				}
-    			}
+    			// файл в папке фильма забирает постер этого фильма, искать по имени файла незачем
+    			if (!row.folder && show && show.type === 'movie') src = TMDB.image(show.poster, 'w300');
 
     			if (!src) {
     				if (lookups >= TMDB_MAX_LOOKUP) continue; // на пёстрой папке не устраиваем шквал поиска
