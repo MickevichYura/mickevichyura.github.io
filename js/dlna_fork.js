@@ -26,6 +26,158 @@
 		'dev0/srv0/control'                      // Plex DLNA
 	];
 
+	/**
+	 * Работа с DLNA-сервером: общая для поиска по карточке и для браузера по серверу
+	 */
+	var DLNA = {
+
+		// local proxy is needed for Synology NAS with old upnp sdk used (CORS restricted)
+		// UPnP/1.0, Portable SDK for UPnP devices/1.6.18: https://github.com/pupnp/pupnp/commit/542c318acff73bf9be85b886a6e447bc473f57f2
+		getProxyURL: function (url) {
+			var proxy = Lampa.Storage.get('synology_nas_proxy') || Lampa.Storage.get('synology_dlna_proxy');
+			if (proxy) {
+				if (proxy.indexOf('http') === -1) proxy = 'http://' + proxy;
+				url = proxy + (proxy.endsWith('/') ? '' : '/') + url;
+			}
+			return url;
+		},
+
+		soapBrowse: function (serviceURL, folder_id) {
+			var soapAction = '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"';
+			var soapBody = `
+			<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+			<s:Body>
+			<u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+			<ObjectID>`+folder_id+`</ObjectID>
+			<BrowseFlag>BrowseDirectChildren</BrowseFlag>
+			<Filter>*</Filter>
+			<StartingIndex>0</StartingIndex>
+			<RequestedCount>1000</RequestedCount>
+			<SortCriteria></SortCriteria>
+			</u:Browse>
+			</s:Body>
+			</s:Envelope>`;
+			return new Promise(function (resolve) {
+				$.ajax({
+					url: serviceURL,
+					type: "POST",
+					dataType: "xml",
+					data: soapBody,
+					headers: {
+						"SOAPAction": soapAction,
+						"Content-Type": "text/xml"
+					},
+					success: function (response) {
+						resolve(response && response.documentElement ? response.documentElement.outerHTML : null);
+					},
+					error: function () {
+						resolve(null);
+					}
+				});
+			});
+		},
+
+		parseXml: function (xmlResponse) {
+			var parser = new DOMParser();
+			var xmlDoc = parser.parseFromString(xmlResponse, "text/xml");
+			var resultNode = xmlDoc.getElementsByTagName('Result')[0];
+			if (!resultNode) return null;
+			var result = resultNode.textContent;
+			var decodedResult;
+			try { decodedResult = decodeURIComponent(result); }
+			catch (e) { decodedResult = result; } // имена файлов с '%' ломают decodeURIComponent
+			var resultDoc = parser.parseFromString(decodedResult, "text/xml");
+			var containers = resultDoc.getElementsByTagName('container');
+			var items = resultDoc.getElementsByTagName('item');
+			var filesAndDirectories = [];
+			var parseNode = function (node) {
+				var nodeInfo = {};
+				for (var i = 0; i < node.attributes.length; i++) {
+					nodeInfo[node.attributes[i].name] = node.attributes[i].value;
+				}
+				for (var i = 0; i < node.childNodes.length; i++) {
+					if (node.childNodes[i].nodeType === 1) { // if element node
+						var name = node.childNodes[i].nodeName;
+						if (name === 'dc:title') name = 'title';
+						if (name === 'upnp:class') name = 'type';
+						if (name === 'res') name = 'url';
+						if (nodeInfo[name]) continue;
+						nodeInfo[name] = node.childNodes[i].textContent;
+						for (var j = 0; j < node.childNodes[i].attributes.length; j++) {
+							nodeInfo[node.childNodes[i].attributes[j].name] = node.childNodes[i].attributes[j].value;
+						}
+					}
+				}
+				return nodeInfo;
+			};
+			for (var i = 0; i < containers.length; i++) {
+				filesAndDirectories.push(parseNode(containers[i]));
+			}
+			for (var i = 0; i < items.length; i++) {
+				filesAndDirectories.push(parseNode(items[i]));
+			}
+			return filesAndDirectories;
+		},
+
+		browse: async function (folder_id) {
+			if (typeof folder_id === 'undefined') folder_id = 0;
+
+			var serverDLNA = Lampa.Storage.get('synology_nas_server');
+			if (!serverDLNA || serverDLNA === '') {
+				Lampa.Noty.show('DLNA: не задан адрес сервера');
+				console.error('DLNA', 'Не задан адрес сервера');
+				return [];
+			}
+
+			var base = serverDLNA + (serverDLNA.endsWith('/') ? '' : '/');
+			if (base.indexOf('http') === -1) base = 'http://' + base;
+
+			// известный рабочий путь пробуем первым, иначе перебираем кандидатов
+			var known = Lampa.Storage.get('dlna_control_path', '');
+			var candidates = known ? [known].concat(CONTROL_PATHS.filter(function (p) { return p !== known; })) : CONTROL_PATHS.slice();
+
+			for (var i = 0; i < candidates.length; i++) {
+				var url = DLNA.getProxyURL(base + candidates[i]);
+				var xml = await DLNA.soapBrowse(url, folder_id);
+				if (xml) {
+					var parsed = DLNA.parseXml(xml);
+					if (parsed !== null) {
+						if (known !== candidates[i]) {
+							Lampa.Storage.set('dlna_control_path', candidates[i]);
+							console.log('DLNA', 'control path:', candidates[i]);
+						}
+						return parsed;
+					}
+				}
+			}
+
+			Lampa.Noty.show('DLNA: не удалось подключиться к серверу');
+			console.error('DLNA', 'ни один control-путь не ответил', base, CONTROL_PATHS);
+			return [];
+		},
+
+		isFolder: function (node) {
+			return (node.type || '').indexOf('object.container') === 0;
+		},
+
+		isVideo: function (node) {
+			return (node.type || '').indexOf('object.item.videoItem') === 0;
+		},
+
+		isAudio: function (node) {
+			return (node.type || '').indexOf('object.item.audioItem') === 0;
+		},
+
+		humanSize: function (bytes) {
+			var size = parseInt(bytes);
+			if (!size || isNaN(size)) return '';
+			var unit = ['B', 'KB', 'MB', 'GB', 'TB'];
+			var i = 0;
+			while (size >= 1024 && i < unit.length - 1) { size = size / 1024; i++; }
+			return (i > 1 ? size.toFixed(2) : Math.round(size)) + ' ' + unit[i];
+		}
+	};
+
 	function synology(component, _object) {
 		var network = new Lampa.Reguest();
 		var extract = {};
@@ -39,16 +191,7 @@
 		};
 
 
-      // local proxy is needed for Synology NAS with old upnp sdk used (CORS restricted)
-      // UPnP/1.0, Portable SDK for UPnP devices/1.6.18: https://github.com/pupnp/pupnp/commit/542c318acff73bf9be85b886a6e447bc473f57f2 
-		this.getProxyURL = function (url) {
-			var proxy = Lampa.Storage.get('synology_nas_proxy') || Lampa.Storage.get('synology_dlna_proxy');
-			if (proxy) {
-				if (proxy.indexOf('http') === -1) proxy = 'http://' + proxy;  
-				url = proxy + (proxy.endsWith('/') ? '' : '/') + url;
-			}
-			return url;        
-		}
+		this.getProxyURL = DLNA.getProxyURL;
 
 		this.levenshtein = function (a, b) {
 			const matrix = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
@@ -224,120 +367,11 @@
 				component.loading(false);  				        	
 			}
 
-			this.soapBrowse = function (serviceURL, folder_id) {
-				var soapAction = '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"';
-				var soapBody = `
-				<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-				<s:Body>
-				<u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
-				<ObjectID>`+folder_id+`</ObjectID>
-				<BrowseFlag>BrowseDirectChildren</BrowseFlag>
-				<Filter>*</Filter>
-				<StartingIndex>0</StartingIndex>
-				<RequestedCount>1000</RequestedCount>
-				<SortCriteria></SortCriteria>
-				</u:Browse>
-				</s:Body>
-				</s:Envelope>`;
-				return new Promise(function (resolve) {
-					$.ajax({
-						url: serviceURL,
-						type: "POST",
-						dataType: "xml",
-						data: soapBody,
-						headers: {
-							"SOAPAction": soapAction,
-							"Content-Type": "text/xml"
-						},
-						success: function (response) {
-							resolve(response && response.documentElement ? response.documentElement.outerHTML : null);
-						},
-						error: function () {
-							resolve(null);
-						}
-					});
-				});
-			};
+			this.soapBrowse = DLNA.soapBrowse;
 
-			this.getDLNAfiles = async function (folder_id=0) {
-				var _this = this;
+			this.getDLNAfiles = DLNA.browse;
 
-				var serverDLNA = Lampa.Storage.get('synology_nas_server');
-				if (!serverDLNA || serverDLNA === '') {
-					Lampa.Noty.show('DLNA: не задан адрес сервера');
-					console.error('DLNA', 'Не задан адрес сервера');
-					return [];
-				}
-
-				var base = serverDLNA + (serverDLNA.endsWith('/') ? '' : '/');
-				if (base.indexOf('http') === -1) base = 'http://' + base;
-
-				// известный рабочий путь пробуем первым, иначе перебираем кандидатов
-				var known = Lampa.Storage.get('dlna_control_path', '');
-				var candidates = known ? [known].concat(CONTROL_PATHS.filter(function (p) { return p !== known; })) : CONTROL_PATHS.slice();
-
-				for (var i = 0; i < candidates.length; i++) {
-					var url = _this.getProxyURL(base + candidates[i]);
-					var xml = await _this.soapBrowse(url, folder_id);
-					if (xml) {
-						var parsed = _this.parseDLNAXmlResponse(xml);
-						if (parsed !== null) {
-							if (known !== candidates[i]) {
-								Lampa.Storage.set('dlna_control_path', candidates[i]);
-								console.log('DLNA', 'control path:', candidates[i]);
-							}
-							return parsed;
-						}
-					}
-				}
-
-				Lampa.Noty.show('DLNA: не удалось подключиться к серверу');
-				console.error('DLNA', 'ни один control-путь не ответил', base, CONTROL_PATHS);
-				return [];
-			};
-
-
-			this.parseDLNAXmlResponse = function (xmlResponse) {
-				var parser = new DOMParser();
-				var xmlDoc = parser.parseFromString(xmlResponse, "text/xml");
-				var resultNode = xmlDoc.getElementsByTagName('Result')[0];
-				if (!resultNode) return null;
-				var result = resultNode.textContent;
-				var decodedResult;
-				try { decodedResult = decodeURIComponent(result); }
-				catch (e) { decodedResult = result; } // имена файлов с '%' ломают decodeURIComponent
-				var resultDoc = parser.parseFromString(decodedResult, "text/xml");
-				var containers = resultDoc.getElementsByTagName('container');
-				var items = resultDoc.getElementsByTagName('item');
-				var filesAndDirectories = [];
-				var parseNode = function(node) {
-					var nodeInfo = {};
-					for (var i = 0; i < node.attributes.length; i++) {
-						nodeInfo[node.attributes[i].name] = node.attributes[i].value;
-					}
-					for (var i = 0; i < node.childNodes.length; i++) {
-            if (node.childNodes[i].nodeType === 1) { // if element node
-            	var name = node.childNodes[i].nodeName
-            	if(name === 'dc:title') name = 'title';
-            	if(name === 'upnp:class') name = 'type';
-            	if(name === 'res') name = 'url';
-            	if(nodeInfo[name]) continue;
-            	nodeInfo[name] = node.childNodes[i].textContent;
-            	for (var j = 0; j < node.childNodes[i].attributes.length; j++) {
-            		nodeInfo[node.childNodes[i].attributes[j].name] = node.childNodes[i].attributes[j].value;
-            	}
-            }
-          }
-          return nodeInfo;
-        };
-        for (var i = 0; i < containers.length; i++) {
-        	filesAndDirectories.push(parseNode(containers[i]));
-        }
-        for (var i = 0; i < items.length; i++) {
-        	filesAndDirectories.push(parseNode(items[i]));
-        }
-        return filesAndDirectories;
-      }
+			this.parseDLNAXmlResponse = DLNA.parseXml;
 
       /**
        * Начать поиск
@@ -715,6 +749,194 @@
       };
     }
 
+    /**
+     * Отдельная страница: обзор всего содержимого DLNA-сервера
+     * object.folder_id - ObjectID папки на сервере ('0' - корень)
+     */
+    function browser(object) {
+    	var scroll = new Lampa.Scroll({
+    		mask: true,
+    		over: true
+    	});
+    	var last;
+    	var destroyed = false;
+
+    	scroll.body().addClass('torrent-list');
+
+    	this.create = function () {
+    		this.activity.loader(true);
+    		this.build();
+    		return this.render();
+    	};
+
+      /**
+       * Загрузить и показать содержимое папки
+       */
+    	this.build = async function () {
+    		var _this = this;
+    		var nodes;
+
+    		try {
+    			nodes = await DLNA.browse(object.folder_id || '0');
+    		} catch (e) {
+    			console.error('DLNA', 'browse', e);
+    			nodes = [];
+    		}
+
+    		if (destroyed) return;
+
+    		var byTitle = function (a, b) {
+    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    		};
+    		var folders = nodes.filter(DLNA.isFolder).sort(byTitle);
+    		var files = nodes.filter(function (n) { return !DLNA.isFolder(n); }).sort(byTitle);
+
+    		if (!folders.length && !files.length) return this.empty();
+
+    		folders.forEach(function (node) {
+    			_this.appendFolder(node);
+    		});
+
+    		// плейлист по всем проигрываемым файлам папки - чтобы работал переход к следующему
+    		var playable = files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
+
+    		files.forEach(function (node) {
+    			_this.appendFile(node, playable);
+    		});
+
+    		this.activity.loader(false);
+    		this.start(true);
+    		this.activity.toggle();
+    	};
+
+    	this.appendFolder = function (node) {
+    		var item = Lampa.Template.get('synology_nas_folder', {
+    			title: node.title,
+    			quality: node.childCount ? node.childCount + ' ' + Lampa.Lang.translate('dlna_browser_items') : '',
+    			info: ''
+    		});
+    		item.on('hover:enter', function () {
+    			Lampa.Activity.push({
+    				url: '',
+    				title: node.title || Lampa.Lang.translate('synology_nas_title'),
+    				component: 'dlna_browser',
+    				folder_id: node.id,
+    				page: 1
+    			});
+    		});
+    		this.append(item);
+    	};
+
+    	this.appendFile = function (node, playlist_source) {
+    		var descr = [DLNA.humanSize(node.size), node.resolution, node.duration ? String(node.duration).split('.')[0] : '']
+    			.filter(function (v) { return v; }).join(' / ');
+
+    		var item = Lampa.Template.get('synology_nas', {
+    			title: node.title,
+    			quality: descr,
+    			info: ''
+    		});
+    		item.addClass('video--stream');
+
+    		var url = node.url ? DLNA.getProxyURL(node.url) : '';
+    		var can_play = (DLNA.isVideo(node) || DLNA.isAudio(node)) && url;
+    		var viewed = Lampa.Storage.cache('online_view', 5000, []);
+    		var hash = Lampa.Utils.hash(node.id + node.title);
+    		var view = Lampa.Timeline.view(hash);
+
+    		if (DLNA.isVideo(node)) {
+    			item.append(Lampa.Timeline.render(view));
+    			if (Lampa.Timeline.details) item.find('.online__quality').append(Lampa.Timeline.details(view, ' / '));
+    		}
+    		if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
+
+    		item.on('hover:enter', function () {
+    			if (!can_play) return Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_cantplay'));
+
+    			var playlist = playlist_source.map(function (n) {
+    				return {
+    					title: n.title,
+    					url: DLNA.getProxyURL(n.url),
+    					timeline: Lampa.Timeline.view(Lampa.Utils.hash(n.id + n.title))
+    				};
+    			});
+    			var first = {
+    				title: node.title,
+    				url: url,
+    				timeline: view
+    			};
+    			if (playlist.length > 1) first.playlist = playlist;
+
+    			Lampa.Player.play(first);
+    			Lampa.Player.playlist(playlist.length ? playlist : [first]);
+
+    			if (viewed.indexOf(hash) == -1) {
+    				viewed.push(hash);
+    				item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
+    				Lampa.Storage.set('online_view', viewed);
+    			}
+    		});
+    		this.append(item);
+    	};
+
+    	this.append = function (item) {
+    		item.on('hover:focus', function (e) {
+    			last = e.target;
+    			scroll.update($(e.target), true);
+    		});
+    		scroll.append(item);
+    	};
+
+    	this.empty = function () {
+    		var empty = Lampa.Template.get('list_empty');
+    		empty.find('.empty__descr').text(Lampa.Lang.translate('dlna_browser_empty'));
+    		scroll.append(empty);
+    		this.activity.loader(false);
+    		this.start(true);
+    		this.activity.toggle();
+    	};
+
+    	this.start = function (first_select) {
+    		if (Lampa.Activity.active().activity !== this.activity) return;
+
+    		if (first_select && !last) last = scroll.render().find('.selector').eq(0)[0];
+
+    		Lampa.Controller.add('content', {
+    			toggle: function toggle() {
+    				Lampa.Controller.collectionSet(scroll.render());
+    				Lampa.Controller.collectionFocus(last || false, scroll.render());
+    			},
+    			up: function up() {
+    				if (Navigator.canmove('up')) Navigator.move('up');else Lampa.Controller.toggle('head');
+    			},
+    			down: function down() {
+    				Navigator.move('down');
+    			},
+    			right: function right() {
+    				Navigator.move('right');
+    			},
+    			left: function left() {
+    				if (Navigator.canmove('left')) Navigator.move('left');else Lampa.Controller.toggle('menu');
+    			},
+    			back: this.back
+    		});
+    		Lampa.Controller.toggle('content');
+    	};
+
+    	this.render = function () {
+    		return scroll.render();
+    	};
+    	this.back = function () {
+    		Lampa.Activity.backward();
+    	};
+    	this.pause = function () {};
+    	this.stop = function () {};
+    	this.destroy = function () {
+    		destroyed = true;
+    		scroll.destroy();
+    	};
+    }
+
     if (!Lampa.Lang) {
     	var lang_data = {};
     	Lampa.Lang = {
@@ -761,6 +983,34 @@
     		en: 'DLNA',
     		zh: 'DLNA',
     		bg: 'DLNA'
+    	},
+    	dlna_browser_title: {
+    		ru: 'DLNA сервер',
+    		uk: 'DLNA сервер',
+    		en: 'DLNA server',
+    		zh: 'DLNA 服务器',
+    		bg: 'DLNA сървър'
+    	},
+    	dlna_browser_items: {
+    		ru: 'эл.',
+    		uk: 'ел.',
+    		en: 'items',
+    		zh: '项',
+    		bg: 'ел.'
+    	},
+    	dlna_browser_empty: {
+    		ru: 'Папка пуста или сервер недоступен',
+    		uk: 'Папка порожня або сервер недоступний',
+    		en: 'Folder is empty or server is unavailable',
+    		zh: '文件夹为空或服务器不可用',
+    		bg: 'Папката е празна или сървърът е недостъпен'
+    	},
+    	dlna_browser_cantplay: {
+    		ru: 'Этот файл нельзя воспроизвести',
+    		uk: 'Цей файл неможливо відтворити',
+    		en: 'This file cannot be played',
+    		zh: '无法播放此文件',
+    		bg: 'Този файл не може да бъде възпроизведен'
     	}
     });
     function resetTemplates() {
@@ -772,9 +1022,42 @@
     // нужна заглушка, а то при страте лампы говорит пусто
 
     Lampa.Component.add('synology_nas', component);
+    Lampa.Component.add('dlna_browser', browser);
 
     // то же самое
     resetTemplates();
+
+    /**
+     * Пункт в главном меню: открыть корень DLNA-сервера
+     */
+    var menu_icon = "<svg viewBox=\"0 0 48 48\" xmlns=\"http://www.w3.org/2000/svg\"><g fill=\"none\" stroke=\"currentColor\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"5.5\" y=\"5.5\" width=\"37\" height=\"33.1724\" rx=\"1.252\"/><line x1=\"27.8276\" y1=\"5.5\" x2=\"27.8276\" y2=\"38.6724\"/><line x1=\"33.5898\" y1=\"12.2251\" x2=\"36.7378\" y2=\"12.2251\"/><line x1=\"33.5898\" y1=\"17.3047\" x2=\"36.7378\" y2=\"17.3047\"/><rect x=\"8.1292\" y=\"38.6724\" width=\"5.1034\" height=\"3.8276\"/><rect x=\"34.8687\" y=\"38.6724\" width=\"5.1034\" height=\"3.8276\"/></g></svg>";
+
+    function addMenuItem() {
+    	if ($('.menu .menu__list .menu__item[data-action="dlna_browser"]').length) return;
+
+    	var item = $('<li class="menu__item selector" data-action="dlna_browser">' + '<div class="menu__ico">' + menu_icon + '</div>' + '<div class="menu__text">' + Lampa.Lang.translate('dlna_browser_title') + '</div>' + '</li>');
+
+    	item.on('hover:enter', function () {
+    		resetTemplates();
+    		Lampa.Component.add('dlna_browser', browser);
+    		Lampa.Activity.push({
+    			url: '',
+    			title: Lampa.Lang.translate('dlna_browser_title'),
+    			component: 'dlna_browser',
+    			folder_id: '0',
+    			page: 1
+    		});
+    	});
+
+    	$('.menu .menu__list').eq(0).append(item);
+    }
+
+    if (window.appready) addMenuItem();
+    else {
+    	Lampa.Listener.follow('app', function (e) {
+    		if (e.type == 'ready') addMenuItem();
+    	});
+    }
 
     Lampa.Listener.follow('full', function (e) {
     	if (e.type == 'complite') {
