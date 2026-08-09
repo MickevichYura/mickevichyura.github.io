@@ -2,6 +2,7 @@
 	'use strict';
 
 
+	var RELEVANCE_THRESHOLD = 0.6; // 0 = точное вхождение, 1 = ничего общего
 	var MAX_DEPTH   = 2;   // на сколько уровней вложенности спускаться
 	var MAX_FOLDERS = 40;  // предохранитель от обхода всей библиотеки
 
@@ -86,26 +87,43 @@
 
 
         this.findSimilarTitles = function (search_zero, search_one, search_two, videoItems) {
-        	const transliteratedSearchOne = this.transliterate(search_one);
+        	var _this = this;
 
-			  // Создаем массив объектов с заголовками и расстояниями
-        	const similarities = videoItems.map(item => {
-        		const cleanedTitle = this.cleanTitle(item.title).toLowerCase();
-        		const distanceZero = this.levenshtein(cleanedTitle, search_zero.toLowerCase());
-			    const distanceZeroIndex = (cleanedTitle.indexOf(search_zero.toLowerCase()) > -1) ? 0 : 100; // если в названии есть поисковая строка, то сразу расстояние = 0
-			    const distanceOne = this.levenshtein(cleanedTitle, search_one.toLowerCase());
-			    const distanceTwo = this.levenshtein(cleanedTitle, search_two.toLowerCase());
-			    const distanceTranslit = this.levenshtein(cleanedTitle, transliteratedSearchOne);
-			    return { item, title: cleanedTitle, search: search_zero, search_one: search_one, search_two: search_two, distance: Math.min(distanceZero, distanceOne, distanceTwo, distanceTranslit, distanceZeroIndex) };
-			  });
+        	// нормализация: разделители имён файлов -> пробелы
+        	var norm = function (s) {
+        		return (s || '').toLowerCase().replace(/[._\-\[\]()]+/g, ' ').replace(/\s+/g, ' ').trim();
+        	};
 
-			  // Сортируем по расстоянию
-        	similarities.sort((a, b) => a.distance - b.distance);
+        	// все варианты запроса: рус. название, оригинал, транслитерация
+        	var queries = [search_zero, search_one, search_two, _this.transliterate(search_one || ''), _this.transliterate(search_zero || '')]
+        		.map(norm).filter(function (q, i, arr) { return q && arr.indexOf(q) === i; });
 
-			  // console.log('Synology NAS', 'findSimilarTitles', similarities);
+        	var similarities = videoItems.map(function (item) {
+        		var title = norm(_this.cleanTitle(item.title));
+        		var best = 1;
 
-			  // Возвращаем десять наиболее подходящих объекта
-        	return similarities.slice(0, 10).map(item => item.item);
+        		for (var i = 0; i < queries.length; i++) {
+        			var q = queries[i];
+        			var score;
+        			if (title.indexOf(q) > -1) {
+        				score = 0;                                   // запрос целиком внутри имени файла
+        			} else {
+        				// нормируем на длину, иначе длинные имена релизов всегда проигрывают коротким
+        				score = _this.levenshtein(title, q) / Math.max(title.length, q.length, 1);
+        			}
+        			if (score < best) best = score;
+        		}
+
+        		return { item: item, distance: best };
+        	});
+
+        	similarities.sort(function (a, b) { return a.distance - b.distance; });
+
+        	// отсекаем заведомо чужое; если не осталось ничего - показываем три лучших
+        	var relevant = similarities.filter(function (x) { return x.distance <= RELEVANCE_THRESHOLD; });
+        	if (!relevant.length) relevant = similarities.slice(0, 3);
+
+        	return relevant.slice(0, 10).map(function (x) { return x.item; });
         }
 
 
