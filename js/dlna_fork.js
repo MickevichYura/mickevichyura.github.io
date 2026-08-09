@@ -173,6 +173,23 @@
 		},
 
 		/**
+		 * Ключ файла для таймлайна и отметок просмотра
+		 *
+		 * Один и тот же файл получает разные ObjectID в разных разделах сервера
+		 * (All Video, Recently Added, обычная папка), поэтому id брать нельзя -
+		 * иначе прогресс просмотра у одного файла будет свой в каждом разделе.
+		 * Путь ресурса от раздела не зависит.
+		 */
+		fileKey: function (node) {
+			var path = (node.url || '').replace(/^[a-z]+:\/\/[^\/]+/i, '');
+			return path || node.title || '';
+		},
+
+		fileHash: function (node) {
+			return Lampa.Utils.hash(DLNA.fileKey(node));
+		},
+
+		/**
 		 * ObjectID папки по её пути от корня, например 'Video' или 'Video/Folders'
 		 * @returns {String|null} null - такой папки на сервере нет
 		 */
@@ -213,7 +230,7 @@
 				folders.push(node);
 			};
 			var addFile = function (node) {
-				var key = (node.title || '').toLowerCase();
+				var key = DLNA.fileKey(node).toLowerCase();
 				if (!key || seen_file[key]) return;
 				seen_file[key] = true;
 				files.push(node);
@@ -996,7 +1013,7 @@
     		var url = node.url ? DLNA.getProxyURL(node.url) : '';
     		var can_play = (DLNA.isVideo(node) || DLNA.isAudio(node)) && url;
     		var viewed = Lampa.Storage.cache('online_view', 5000, []);
-    		var hash = Lampa.Utils.hash(node.id + node.title);
+    		var hash = DLNA.fileHash(node);
     		var view = Lampa.Timeline.view(hash);
 
     		if (DLNA.isVideo(node)) {
@@ -1012,7 +1029,7 @@
     				return {
     					title: n.title,
     					url: DLNA.getProxyURL(n.url),
-    					timeline: Lampa.Timeline.view(Lampa.Utils.hash(n.id + n.title))
+    					timeline: Lampa.Timeline.view(DLNA.fileHash(n))
     				};
     			});
     			var first = {
