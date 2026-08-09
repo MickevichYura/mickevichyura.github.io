@@ -2,6 +2,18 @@
 	'use strict';
 
 
+	// Разбор S01E02 / 2x05 / _001 из имени файла
+	function parseEpisode(name) {
+		var m;
+		if ((m = name.match(/[sS](\d{1,2})[\s._-]*[eE](\d{1,3})(?!\d)/)))                       return { season: +m[1], episode: +m[2] };
+		if ((m = name.match(/(?:^|[^\dxX])(\d{1,2})x(\d{1,3})(?!\d)/)))                         return { season: +m[1], episode: +m[2] };
+		if ((m = name.match(/(?:^|[\s._-])(?:ep?|episode|серия|s)[\s._-]?(\d{1,3})(?!\d)/i)))   return { season: 1, episode: +m[1] };
+		if ((m = name.match(/[\s._-](\d{1,3})$/)))                                              return { season: 1, episode: +m[1] };
+		return null;
+	}
+
+	var VOICE = 'DLNA'; // у локальных файлов нет озвучек, но Лампа ждёт непустое значение
+
 	var RELEVANCE_THRESHOLD = 0.6; // 0 = точное вхождение, 1 = ничего общего
 	var MAX_DEPTH   = 2;   // на сколько уровней вложенности спускаться
 	var MAX_FOLDERS = 40;  // предохранитель от обхода всей библиотеки
@@ -194,12 +206,17 @@
 
 				results = {'player_links': {"movie": []}};
 
-				results['player_links']["movie"] = videoItemsBest3.map(item => ({ // преобразовываем в нужный формат
-					title: item.title,
-					quality: item.resolution,
-					link: this.getProxyURL(item.url),
-				  translation: item.title // + " (" + item.id + ")"
-				}));
+				results['player_links']["movie"] = videoItemsBest3.map(item => {
+					var se = parseEpisode(item.title || '');
+					return {
+						title: item.title,
+						quality: item.resolution,
+						link: this.getProxyURL(item.url),
+						translation: item.title,
+						season: se ? se.season : undefined,
+						episode: se ? se.episode : undefined
+					};
+				});
 
 				extractData(results);
 				append(filtred());
@@ -429,7 +446,9 @@
 					filtred.push({
 						title: movie.translation, 
 						translation: id,
-						quality: movie.quality
+						quality: movie.quality,
+						season: movie.season,
+						episode: movie.episode
 					});
 				});
 
@@ -448,16 +467,16 @@
       	var viewed = Lampa.Storage.cache('online_view', 5000, []);
       	var last_episode = component.getLastEpisode(items);
       	items.forEach(function (element) {
-      		if (element.season) element.title = 'S' + element.season + ' / ' + Lampa.Lang.translate('torrent_serial_episode') + ' ' + element.episode;
-      		element.info = element.season ? ' / ' + Lampa.Utils.shortText(filter_items.voice[choice.voice], 50) : '';
+      		// имя файла оставляем как есть - оно информативнее, чем 'S1 / Серия 2'
+      		element.info = element.season ? ' / S' + element.season + 'E' + element.episode : '';
       		if (element.season) {
       			element.translate_episode_end = last_episode;
-      			element.translate_voice = filter_items.voice[choice.voice];
+      			element.translate_voice = VOICE;
       		}
-      		var hash = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title].join('') : object.movie.original_title);
+      		var hash = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title].join('') : object.movie.original_title + element.title); // + title: иначе все файлы карточки делят один таймкод
       		var view = Lampa.Timeline.view(hash);
       		var item = Lampa.Template.get('synology_nas', element);
-      		var hash_file = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title, filter_items.voice[choice.voice]].join('') : object.movie.original_title + element.title);
+      		var hash_file = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title, VOICE].join('') : object.movie.original_title + element.title);
       		item.addClass('video--stream');
       		element.timeline = view;
       		item.append(Lampa.Timeline.render(view));
