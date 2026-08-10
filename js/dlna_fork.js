@@ -1858,6 +1858,22 @@
      */
     var menu_icon = "<svg viewBox=\"0 0 48 48\" xmlns=\"http://www.w3.org/2000/svg\"><g fill=\"none\" stroke=\"currentColor\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"5.5\" y=\"5.5\" width=\"37\" height=\"33.1724\" rx=\"1.252\"/><line x1=\"27.8276\" y1=\"5.5\" x2=\"27.8276\" y2=\"38.6724\"/><line x1=\"33.5898\" y1=\"12.2251\" x2=\"36.7378\" y2=\"12.2251\"/><line x1=\"33.5898\" y1=\"17.3047\" x2=\"36.7378\" y2=\"17.3047\"/><rect x=\"8.1292\" y=\"38.6724\" width=\"5.1034\" height=\"3.8276\"/><rect x=\"34.8687\" y=\"38.6724\" width=\"5.1034\" height=\"3.8276\"/></g></svg>";
 
+    /**
+     * Куда встать в меню. Первый список - навигация приложения ("Главная",
+     * "Фильмы", "Сериалы"...), он наполняется динамически, поэтому цепляемся
+     * за пункт "Главная", а не за номер позиции.
+     */
+    function placeMenuItem(item) {
+    	var list = $('.menu .menu__list').eq(0);
+    	var position = Lampa.Storage.get('dlna_menu_position', 'after_main');
+
+    	if (position === 'top') return list.prepend(item);
+    	if (position === 'bottom') return list.append(item);
+
+    	var main = list.find('.menu__item[data-action="main"]');
+    	if (main.length) main.after(item);else list.prepend(item);
+    }
+
     function addMenuItem() {
     	if ($('.menu .menu__list .menu__item[data-action="dlna_browser"]').length) return;
 
@@ -1874,8 +1890,13 @@
     		});
     	});
 
-    	$('.menu .menu__list').eq(0).append(item);
+    	placeMenuItem(item);
     }
+
+    // смена настройки переставляет уже добавленный пункт, перезапуск не нужен
+    if (Lampa.Storage.listener) Lampa.Storage.listener.follow('change', function (e) {
+    	if (e.name === 'dlna_menu_position') placeMenuItem($('.menu .menu__item[data-action="dlna_browser"]'));
+    });
 
     if (window.appready) addMenuItem();
     else {
@@ -1940,6 +1961,23 @@
     		description: 'Например, Video/All Video. Пусто = корень сервера'
     	}
     });    
+    Lampa.SettingsApi.addParam({
+    	component: 'synology_nas_config',
+    	param: {
+    		name: 'dlna_menu_position',
+    		type: 'select',
+    		values: {
+    			top: 'В самом верху',
+    			after_main: 'После «Главная»',
+    			bottom: 'В конце списка'
+    		},
+    	default: 'after_main'
+    	},
+    	field: {
+    		name: 'Пункт DLNA в меню',
+    		description: 'Где показывать пункт в главном меню'
+    	}
+    });
     Lampa.SettingsApi.addParam({
     	component: 'synology_nas_config',
     	param: {
