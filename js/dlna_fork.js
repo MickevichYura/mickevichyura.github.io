@@ -1271,15 +1271,23 @@
     		});
     	}
 
+    	var split = '<span class="season-episode-split">●</span>';
     	var info = [];
     	if (data.rating) info.push('★ ' + parseFloat(data.rating).toFixed(1));
     	if (data.date) info.push(dateHuman(data.date));
     	if (data.size) info.push(data.size);
     	if (data.warning) info.push(data.warning);
-    	item.find('.season-episode__info').html(info.join('<span class="season-episode-split">●</span>'));
+
+    	var info_line = item.find('.season-episode__info').html(info.join(split));
 
     	// прогресс просмотра заменяет звёздочку - как в штатном списке серий
     	if (data.timeline) item.find('.season-episode__timeline').append(Lampa.Timeline.render(data.timeline));
+
+    	// "Просмотрено - 10 м. из 46 м. / 23%" видно прямо в списке, заходить в серию не нужно.
+    	// Ядро само прячет строку, когда прогресса нет, и само обновляет её по data-hash
+    	if (data.timeline && Lampa.Timeline.details) {
+    		info_line.append(Lampa.Timeline.details(data.timeline, info.length ? split : ''));
+    	}
 
     	return item;
     }
