@@ -17,10 +17,19 @@
 	var RELEVANCE_THRESHOLD = 0.6; // 0 = точное вхождение, 1 = ничего общего
 	var MAX_DEPTH   = 2;   // на сколько уровней вложенности спускаться
 	var MAX_FOLDERS = 40;  // предохранитель от обхода всей библиотеки
+	var MAX_RESULTS = 300; // сериал целиком должен помещаться: сезонов много, серий ещё больше
+	var MAX_SEASONS = 10;  // сколько сезонов подтягиваем из TMDB на одну карточку
 
 	var BROWSER_ROOT  = 'Video'; // с какой папки сервера начинается страница DLNA
 	var TREE_DEPTH    = 4;       // глубина сбора дерева для главной страницы
 	var TREE_MAX_NODE = 100;     // сколько папок максимум обходим за один уровень
+
+	// порядок строк в списке файлов карточки; первый вариант - по умолчанию
+	var FILE_SORTS = [
+		{ name: 'По сезонам и сериям', by: 'episode' },
+		{ name: 'По имени файла', by: 'title' },
+		{ name: 'Сначала большие', by: 'size' }
+	];
 
 	var THUMB_PARALLEL = 4;    // сколько превью тянем одновременно, чтобы не завалить сервер
 	var TMDB_MAX_LOOKUP = 40;  // сколько поисков TMDB максимум на один список
@@ -564,11 +573,11 @@
 		var results = [];
 		var object = _object;
 		var episodes = {}; // серии по сезонам из TMDB для этой карточки
-		var filter_items = {};
+		var filter_items = { season: [], sort: [] };
+		var seasons = [];  // номера сезонов в том же порядке, что и filter_items.season (0 = все)
 		var choice = {
 			season: 0,
-			voice: 0,
-			voice_name: ''
+			sort: Lampa.Storage.get('dlna_files_sort', 0) // порядок - привычка зрителя, а не свойство карточки
 		};
 
 
@@ -659,7 +668,7 @@
         	var relevant = similarities.filter(function (x) { return x.distance <= RELEVANCE_THRESHOLD; });
         	if (!relevant.length) relevant = similarities.slice(0, 3);
 
-        	return relevant.slice(0, 10).map(function (x) { return x.item; });
+        	return relevant.slice(0, MAX_RESULTS).map(function (x) { return x.item; });
         }
 
 
@@ -749,7 +758,7 @@
 				await this.loadEpisodes(results.player_links.movie);
 
 				extractData(results);
-				append(filtred());
+				this.show();
 
 				component.loading(false);
 			}
@@ -765,10 +774,12 @@
 				var need = {};
 				movies.forEach(function (m) { if (m.season) need[m.season] = true; });
 
-				var list = Object.keys(need).slice(0, 5);
-				for (var i = 0; i < list.length; i++) {
-					episodes[list[i]] = await TMDB.season(movie.id, list[i]);
-				}
+				// список плоский, сезоны в нём видны все сразу, поэтому тянем их параллельно
+				var list = Object.keys(need).sort(function (a, b) { return a - b; }).slice(0, MAX_SEASONS);
+
+				await Promise.all(list.map(async function (season) {
+					episodes[season] = await TMDB.season(movie.id, season);
+				}));
 			};
 
 			this.soapBrowse = DLNA.soapBrowse;
@@ -794,28 +805,33 @@
        * Сброс фильтра
        */
       this.reset = function () {
-      	component.reset();
-      	choice = {
-      		season: 0,
-      		voice: 0,
-      		voice_name: ''
-      	};
-      	extractData(results);
-      	component.saveChoice(choice);
+      	choice.season = 0;
+      	this.show();
       };
 
       /**
-       * Применить фильтр
-       * @param {*} type 
-       * @param {*} a 
-       * @param {*} b 
+       * Применить фильтр или сортировку
+       *
+       * Сортировка в панели плоская, поэтому выбранный пункт приходит в a,
+       * а у фильтра сезонов есть подменю и пункт лежит в b.
        */
       this.filter = function (type, a, b) {
-      	choice[a.stype] = b.index;
-      	if (a.stype == 'voice') choice.voice_name = filter_items.voice[b.index];
-      	component.reset();
-      	extractData(results);
-      	component.saveChoice(choice);
+      	if (a.reset) return this.reset();
+
+      	if (type === 'sort') {
+      		choice.sort = a.index;
+      		Lampa.Storage.set('dlna_files_sort', a.index);
+      	} else if (b) choice[a.stype] = b.index;
+
+      	this.show();
+      };
+
+      /**
+       * Перерисовать список по текущему выбору
+       */
+      this.show = function () {
+      	buildFilter();
+      	append(filtred());
       };
 
       /**
@@ -871,29 +887,77 @@
 
 
       /**
-       * Отфильтровать файлы
+       * Собрать панель фильтра по тому, что реально нашлось
+       *
+       * Сезон предлагаем выбирать, только если их несколько: на одном сезоне
+       * фильтр лишний, а сортировка нужна всегда.
+       */
+      function buildFilter() {
+      	seasons = [];
+      	results.player_links.movie.forEach(function (movie) {
+      		if (movie.season && seasons.indexOf(movie.season) === -1) seasons.push(movie.season);
+      	});
+      	seasons.sort(function (a, b) { return a - b; });
+
+      	filter_items.season = seasons.length > 1
+      		? ['Все сезоны'].concat(seasons.map(function (s) { return Lampa.Lang.translate('torrent_serial_season') + ' ' + s; }))
+      		: [];
+      	filter_items.sort = FILE_SORTS.map(function (s) { return s.name; });
+
+      	if (choice.season >= filter_items.season.length) choice.season = 0;
+      	if (choice.sort >= filter_items.sort.length) choice.sort = 0;
+
+      	component.filter(filter_items, choice);
+      }
+
+      /**
+       * Имена файлов сравниваем по-человечески: "Серия 2" раньше "Серии 10"
+       */
+      function byTitle(a, b) {
+      	return String(a.title).localeCompare(String(b.title), undefined, { numeric: true });
+      }
+
+      /**
+       * Отобрать и упорядочить файлы под текущий выбор
+       *
+       * Порядок списка - это ещё и порядок плейлиста: по нему плеер идёт
+       * к следующей серии, поэтому по умолчанию сортируем по сезону и серии.
        * @returns array
        */
       function filtred() {
-      	// console.log('Synology NAS', 'filtred results', results);
-      	var filtred = [];
+      	var files = results.player_links.movie.map(function (movie, index) {
+      		return {
+      			title: movie.translation,
+      			translation: (index + 1).toString(), // ключ в extract: считается до сортировки, поэтому не съезжает
+      			quality: movie.quality,
+      			path: movie.path,
+      			size: movie.size,
+      			duration: movie.duration,
+      			season: movie.season,
+      			episode: movie.episode
+      		};
+      	});
 
-        // console.log('Synology NAS', 'filtred filtred', filtred);
-      	results.player_links.movie.forEach((movie, index) => {
-					const id = (index + 1).toString(); // convert index to string for keys
-					filtred.push({
-						title: movie.translation,
-						translation: id,
-						quality: movie.quality,
-						path: movie.path,
-						size: movie.size,
-						duration: movie.duration,
-						season: movie.season,
-						episode: movie.episode
-					});
-				});
+      	var season = choice.season > 0 ? seasons[choice.season - 1] : 0; // первый пункт списка - "Все сезоны"
+      	if (season) files = files.filter(function (f) { return f.season === season; });
 
-      	return filtred;
+      	var by = (FILE_SORTS[choice.sort] || FILE_SORTS[0]).by;
+
+      	files.sort(function (a, b) {
+      		if (by === 'size') return (b.size || 0) - (a.size || 0);
+      		if (by === 'title') return byTitle(a, b);
+
+      		// нераспознанное (фильм, трейлеры, «бонусы») уводим вниз, к сериям оно отношения не имеет
+      		var as = a.season || 1e6, bs = b.season || 1e6;
+      		if (as !== bs) return as - bs;
+
+      		var ae = a.episode || 1e6, be = b.episode || 1e6;
+      		if (ae !== be) return ae - be;
+
+      		return byTitle(a, b);
+      	});
+
+      	return files;
       }
 
 
@@ -907,6 +971,11 @@
       	component.reset();
       	var viewed = Lampa.Storage.cache('online_view', 5000, []);
       	var last_episode = component.getLastEpisode(items);
+
+      	// когда на экране несколько сезонов, номер серии без сезона ни о чём не говорит
+      	var shown = [];
+      	items.forEach(function (el) { if (el.season && shown.indexOf(el.season) === -1) shown.push(el.season); });
+      	var multi_season = shown.length > 1;
 
         /**
          * Что показать в плеере: название серии, если оно найдено, иначе имя файла
@@ -946,6 +1015,7 @@
       		if (ep) {
       			item = buildEpisodeItem({
       				number: element.episode,
+      				season: multi_season ? element.season : 0,
       				title: ep.name || element.title,
       				still: TMDB.image(ep.still, 'w300'),
       				rating: ep.rating,
@@ -965,6 +1035,7 @@
       			}
       			if (viewed.indexOf(hash_file) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       		}
+      		markViewed(item, viewed.indexOf(hash_file) !== -1, view);
       		item.on('hover:enter', function () {
       			if (object.movie.id) Lampa.Favorite.add('history', object.movie, 100);
             // console.log('Synology NAS', 'hover:enter', element);
@@ -1002,6 +1073,7 @@
       					if (!ep) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       					Lampa.Storage.set('online_view', viewed);
       				}
+      				item.addClass(VIEWED_CLASS);
       				DLNA.syncViewed(hash_file, hash_path);
       			} else Lampa.Noty.show(Lampa.Lang.translate('online_nolink'));
       		});
@@ -1031,15 +1103,11 @@
     	};
     	var last;
     	var last_filter;
-    	var extended;
-    	var selected_id;
     	var filter_translate = {
     		season: Lampa.Lang.translate('torrent_serial_season'),
-    		voice: Lampa.Lang.translate('torrent_parser_voice'),
     		source: Lampa.Lang.translate('settings_rest_source')
     	};
     	var filter_sources = ['synology'];
-    	var kiposk_sources = [];
 
     	if (filter_sources.indexOf(balanser) == -1) {
     		balanser = 'synology';
@@ -1064,6 +1132,16 @@
     				clarification: true
     			});
     		};
+    		filter.onSelect = function (type, a, b) {
+    			sources[balanser].filter(type, a, b);
+    		};
+    		filter.onBack = function () {
+    			_this.start();
+    		};
+    		// строка фильтра лежит внутри скролла: с первого файла возвращаемся именно на неё
+    		filter.render().find('.filter--search, .filter--sort, .filter--filter').on('hover:focus', function (e) {
+    			last_filter = e.target;
+    		});
     		files.append(scroll.render());
     		scroll.append(filter.render());
     		this.search();
@@ -1081,10 +1159,33 @@
     	this.find = function () {
     		sources['synology'].search(object);
     	};
-    	this.saveChoice = function (choice) {
-    		var data = Lampa.Storage.cache('synology_nas_choice_' + balanser, 500, {});
-    		data[selected_id || object.movie.id] = choice;
-    		Lampa.Storage.set('synology_nas_choice_' + balanser, data);
+      /**
+       * Наполнить панель фильтра
+       *
+       * Сортировка у ядра плоская, фильтр - с подменю: поэтому сезоны уходят
+       * одной группой со своим stype, а варианты порядка - простым списком.
+       */
+    	this.filter = function (items, choose) {
+    		var select = [];
+
+    		if (items.season.length) select.push({
+    			title: filter_translate.season,
+    			subtitle: items.season[choose.season],
+    			stype: 'season',
+    			items: items.season.map(function (name, i) {
+    				return { title: name, selected: i === choose.season, index: i };
+    			})
+    		});
+
+    		if (choose.season) select.push({ title: 'Сбросить фильтр', reset: true });
+
+    		filter.set('filter', select);
+    		filter.set('sort', items.sort.map(function (name, i) {
+    			return { title: name, selected: i === choose.sort, index: i, stype: 'sort' };
+    		}));
+
+    		filter.chosen('filter', items.season.length && choose.season ? [items.season[choose.season]] : []);
+    		filter.chosen('sort', [items.sort[choose.sort]]);
     	};
 
       /**
@@ -1113,6 +1214,7 @@
        * Добавить файл
        */
     	this.append = function (item) {
+    		item.addClass('dlna-row'); // метка строки файла: в скролле лежит ещё и панель фильтра
     		item.on('hover:focus', function (e) {
     			last = e.target;
     			scroll.update($(e.target), true);
@@ -1151,8 +1253,9 @@
         if (Lampa.Activity.active().activity !== this.activity) return; //обязательно, иначе наблюдается баг, активность создается но не стартует, в то время как компонент загружается и стартует самого себя.
 
         if (first_select) {
-        	var last_views = scroll.render().find('.selector.online').find('.torrent-item__viewed').parent().last();
-        	if (object.movie.number_of_seasons && last_views.length) last = last_views.eq(0)[0];else last = scroll.render().find('.selector').eq(3)[0];
+        	// у сериала список открывается там, где остановились, а не на первой серии
+        	var resume = object.movie.number_of_seasons ? resumeItem(scroll) : null;
+        	last = resume || scroll.render().find('.dlna-row').eq(0)[0];
         }
         Lampa.Background.immediately(Lampa.Utils.cardImgBackground(object.movie));
         Lampa.Controller.add('content', {
@@ -1162,7 +1265,8 @@
         	},
         	up: function up() {
         		if (Navigator.canmove('up')) {
-        			if (scroll.render().find('.selector').slice(3).index(last) == 0 && last_filter) {
+        			// с первой строки уходим на панель фильтра, а не куда придётся
+        			if (scroll.render().find('.dlna-row').index(last) == 0 && last_filter) {
         				Lampa.Controller.collectionFocus(last_filter, scroll.render());
         			} else Navigator.move('up');
         		} else Lampa.Controller.toggle('head');
@@ -1171,7 +1275,11 @@
         		Navigator.move('down');
         	},
         	right: function right() {
-        		if (Navigator.canmove('right')) Navigator.move('right');else filter.show(Lampa.Lang.translate('title_filter'), 'filter');
+        		if (Navigator.canmove('right')) return Navigator.move('right');
+
+        		// на одном сезоне фильтровать нечего, но порядок выбрать всё равно можно
+        		if (filter.get('filter').length) filter.show(Lampa.Lang.translate('title_filter'), 'filter');
+        		else filter.show(Lampa.Lang.translate('filter_sorted'), 'sort');
         	},
         	left: function left() {
         		if (Navigator.canmove('left')) Navigator.move('left');else Lampa.Controller.toggle('menu');
@@ -1269,12 +1377,46 @@
     }
 
     /**
+     * Отметки просмотра на строке. Звёздочка есть не у всех видов строк - у серии
+     * её заменяет полоса прогресса, поэтому метим классами, а не по значку.
+     */
+    var VIEWED_CLASS = 'dlna-viewed';
+    var UNFINISHED_CLASS = 'dlna-unfinished';
+    var VIEWED_DONE = 90; // с этого процента считаем серию досмотренной, как и плеер
+
+    function markViewed(item, is_viewed, timeline) {
+    	var percent = timeline ? timeline.percent : 0;
+
+    	if (!is_viewed && !percent) return;
+
+    	item.addClass(VIEWED_CLASS);
+    	if (percent > 0 && percent < VIEWED_DONE) item.addClass(UNFINISHED_CLASS);
+    }
+
+    /**
+     * Строка, с которой продолжить просмотр: на ней открывается список и туда же
+     * прокручивается длинный сезон. Недосмотренную серию открываем саму, после
+     * досмотренной переходим к следующей строке списка.
+     */
+    function resumeItem(scroll) {
+    	var viewed = scroll.render().find('.selector.' + VIEWED_CLASS);
+    	if (!viewed.length) return null;
+
+    	var last = viewed.last();
+    	if (last.hasClass(UNFINISHED_CLASS)) return last[0];
+
+    	var all = scroll.render().find('.selector');
+    	var next = all.eq(all.index(last) + 1);
+    	return (next.length ? next : last)[0];
+    }
+
+    /**
      * Строка в нативном стиле серии: кадр с номером слева, название, таймлайн, рейтинг и дата
      *
      * Используется и на странице DLNA, и в списке DLNA на карточке сериала,
      * поэтому берём шаблон ядра - вид совпадает со штатным списком серий.
      *
-     * @param {Object} data {number, title, still, rating, date, time, quality, size, timeline}
+     * @param {Object} data {number, season, title, still, rating, date, time, quality, size, timeline}
      */
     function buildEpisodeItem(data) {
     	addBrowserStyle(); // строка используется и на карточке, где стили ещё не подключены
@@ -1290,7 +1432,12 @@
 
     	var box = item.find('.season-episode__img');
     	box.find('.season-episode__loader').remove(); // картинки грузим своей очередью
-    	box.append('<div class="season-episode__episode-number">' + ('0' + data.number).slice(-2) + '</div>');
+
+    	// сезон в номере нужен, только когда в списке их несколько - иначе он всюду один и тот же
+    	var number = ('0' + data.number).slice(-2);
+    	var badge = data.season ? '<span class="dlna-num--se">' + data.season + '×' + number + '</span>' : number;
+
+    	box.append('<div class="season-episode__episode-number">' + badge + '</div>');
 
     	if (data.still) {
     		queueThumb(box.find('img')[0], data.still, function () {
@@ -1335,6 +1482,8 @@
     		+ '.dlna-episode{margin-bottom:1em}'
     		+ '.dlna-episode .season-episode-split{margin:0 0.6em}'
     		+ '.dlna-episode .dlna-warn{color:#ffb74d}'
+    		// "2×03" длиннее обычного номера, на узком экране кадр всего 7em - уменьшаем
+    		+ '.dlna-episode .dlna-num--se{font-size:0.7em}'
     		+ '</style>').appendTo('head');
     }
 
@@ -1355,6 +1504,7 @@
     	var rows = [];     // компактные строки, чтобы дорисовать в них превью, когда придёт ответ TMDB
     	var show = null;   // сериал/фильм, с которым сопоставлена текущая папка
     	var seasons = {};  // серии по сезонам из TMDB
+    	var multi_season = false; // в папке лежит больше одного сезона
 
     	scroll.body().addClass('torrent-list');
 
@@ -1447,6 +1597,8 @@
     		});
 
     		var list = Object.keys(need).slice(0, 5); // папка со всеми сезонами сразу не должна тормозить открытие
+    		multi_season = list.length > 1;
+
     		for (var i = 0; i < list.length; i++) {
     			var data = await TMDB.season(show.id, list[i]);
     			if (destroyed) return;
@@ -1566,6 +1718,7 @@
     		if (episode) {
     			item = buildEpisodeItem({
     				number: episode.number,
+    				season: multi_season ? episode.season : 0,
     				title: episode.data.name || node.title,
     				still: TMDB.image(episode.data.still, 'w300'),
     				rating: episode.data.rating,
@@ -1591,6 +1744,7 @@
     			}
     			if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     		}
+    		markViewed(item, viewed.indexOf(hash) !== -1, view);
 
     		var _this = this;
 
@@ -1623,6 +1777,7 @@
     				if (!episode) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     				Lampa.Storage.set('online_view', viewed);
     			}
+    			item.addClass(VIEWED_CLASS);
     			if (link) DLNA.syncViewed(hash, link.v);
     		});
     		this.append(item);
@@ -1704,7 +1859,9 @@
     	this.start = function (first_select) {
     		if (Lampa.Activity.active().activity !== this.activity) return;
 
-    		if (first_select && !last) last = scroll.render().find('.selector').eq(0)[0];
+    		// внутри папки встаём туда, где остановились; на главной список и так
+    		// отсортирован по свежести просмотра, там нужен самый верх
+    		if (first_select && !last) last = (object.folder_id && resumeItem(scroll)) || scroll.render().find('.selector').eq(0)[0];
 
     		Lampa.Controller.add('content', {
     			toggle: function toggle() {
@@ -1843,7 +2000,7 @@
     	// вариант с кадром-превью: используется, только если сервер отдал миниатюры
     	Lampa.Template.add('dlna_thumb', "<div class=\"online selector\">\n        <div class=\"online__body\">\n            <div class=\"dlna-thumb\"></div>\n            <div class=\"online__title\">{title}</div>\n            <div class=\"online__quality\">{quality}{info}</div>\n        </div>\n    </div>");
     }
-    var button = "<div class=\"full-start__button selector view--online\" data-subtitle=\"v0.0.2\">\n    <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:svgjs=\"http://svgjs.com/svgjs\" version=\"1.1\" width=\"512\" height=\"512\" x=\"0\" y=\"0\" viewBox=\"0 0 30.051 30.051\" style=\"enable-background:new 0 0 512 512\" xml:space=\"preserve\" class=\"\">\n    <g xmlns=\"http://www.w3.org/2000/svg\">\n        <path d=\"M19.982,14.438l-6.24-4.536c-0.229-0.166-0.533-0.191-0.784-0.062c-0.253,0.128-0.411,0.388-0.411,0.669v9.069   c0,0.284,0.158,0.543,0.411,0.671c0.107,0.054,0.224,0.081,0.342,0.081c0.154,0,0.31-0.049,0.442-0.146l6.24-4.532   c0.197-0.145,0.312-0.369,0.312-0.607C20.295,14.803,20.177,14.58,19.982,14.438z\" fill=\"currentColor\"/>\n        <path d=\"M15.026,0.002C6.726,0.002,0,6.728,0,15.028c0,8.297,6.726,15.021,15.026,15.021c8.298,0,15.025-6.725,15.025-15.021   C30.052,6.728,23.324,0.002,15.026,0.002z M15.026,27.542c-6.912,0-12.516-5.601-12.516-12.514c0-6.91,5.604-12.518,12.516-12.518   c6.911,0,12.514,5.607,12.514,12.518C27.541,21.941,21.937,27.542,15.026,27.542z\" fill=\"currentColor\"/>\n    </g></svg>\n\n    <span>#{synology_nas_title}</span>\n    </div>";
+    var button = "<div class=\"full-start__button selector view--online\" data-subtitle=\"v0.0.3\">\n    <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:svgjs=\"http://svgjs.com/svgjs\" version=\"1.1\" width=\"512\" height=\"512\" x=\"0\" y=\"0\" viewBox=\"0 0 30.051 30.051\" style=\"enable-background:new 0 0 512 512\" xml:space=\"preserve\" class=\"\">\n    <g xmlns=\"http://www.w3.org/2000/svg\">\n        <path d=\"M19.982,14.438l-6.24-4.536c-0.229-0.166-0.533-0.191-0.784-0.062c-0.253,0.128-0.411,0.388-0.411,0.669v9.069   c0,0.284,0.158,0.543,0.411,0.671c0.107,0.054,0.224,0.081,0.342,0.081c0.154,0,0.31-0.049,0.442-0.146l6.24-4.532   c0.197-0.145,0.312-0.369,0.312-0.607C20.295,14.803,20.177,14.58,19.982,14.438z\" fill=\"currentColor\"/>\n        <path d=\"M15.026,0.002C6.726,0.002,0,6.728,0,15.028c0,8.297,6.726,15.021,15.026,15.021c8.298,0,15.025-6.725,15.025-15.021   C30.052,6.728,23.324,0.002,15.026,0.002z M15.026,27.542c-6.912,0-12.516-5.601-12.516-12.514c0-6.91,5.604-12.518,12.516-12.518   c6.911,0,12.514,5.607,12.514,12.518C27.541,21.941,21.937,27.542,15.026,27.542z\" fill=\"currentColor\"/>\n    </g></svg>\n\n    <span>#{synology_nas_title}</span>\n    </div>";
 
     // нужна заглушка, а то при страте лампы говорит пусто
 
@@ -1905,6 +2062,36 @@
     	});
     }
 
+    /**
+     * Куда положить кнопку в карточке
+     *
+     * Новая карточка держит все кнопки-источники в скрытом .buttons--container
+     * и показывает их списком по нажатию «Смотреть». Отдельная кнопка - это
+     * место в видимом ряду .full-start-new__buttons, там её никто не прячет.
+     */
+    function placeCardButton(render, btn) {
+    	var row = render.find('.full-start-new__buttons').eq(0);
+    	var separate = Lampa.Storage.get('dlna_card_button', 'separate') === 'separate';
+
+    	if (separate && row.length) {
+    		var play = row.find('.button--play');
+
+    		if (play.length) play.after(btn);else row.prepend(btn);
+    		return;
+    	}
+
+    	var container = render.find('.buttons--container').eq(0);
+    	var list = container.length ? container : render.find('.view--torrent').parent();
+    	if (!list.length) return;
+
+    	// список источников читается по порядку в DOM, поэтому встаём первыми.
+    	// Откладываем на тик: плагины, которые добавляют свои кнопки на этом же
+    	// событии, иначе окажутся выше нас.
+    	setTimeout(function () {
+    		list.prepend(btn);
+    	}, 0);
+    }
+
     Lampa.Listener.follow('full', function (e) {
     	if (e.type == 'complite') {
     		var btn = $(Lampa.Lang.translate(button));
@@ -1922,7 +2109,7 @@
     				page: 1
     			});
     		});
-    		e.object.activity.render().find('.view--torrent').after(btn);
+    		placeCardButton(e.object.activity.render(), btn);
     	}
     });
 
@@ -1976,6 +2163,22 @@
     	field: {
     		name: 'Пункт DLNA в меню',
     		description: 'Где показывать пункт в главном меню'
+    	}
+    });
+    Lampa.SettingsApi.addParam({
+    	component: 'synology_nas_config',
+    	param: {
+    		name: 'dlna_card_button',
+    		type: 'select',
+    		values: {
+    			separate: 'Отдельной кнопкой',
+    			source: 'Пунктом в списке «Смотреть»'
+    		},
+    	default: 'separate'
+    	},
+    	field: {
+    		name: 'Кнопка DLNA в карточке',
+    		description: 'Видно после повторного открытия карточки'
     	}
     });
     Lampa.SettingsApi.addParam({
