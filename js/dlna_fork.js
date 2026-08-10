@@ -474,7 +474,8 @@
 			var key = DLNA.cleanName(title).toLowerCase();
 			if (!key) return null;
 
-			var cache = Lampa.Storage.cache('dlna_tmdb_match', 500, {});
+			// ключ с цифрой: в старом кеше не было названия, а оно нужно для заголовка в плеере
+			var cache = Lampa.Storage.cache('dlna_tmdb_match2', 500, {});
 			if (cache[key]) return cache[key].miss ? null : cache[key];
 
 			var json = await TMDB.request('search/multi?' + TMDB.params() + '&query=' + encodeURIComponent(key));
@@ -482,9 +483,14 @@
 				return (r.media_type === 'tv' || r.media_type === 'movie') && r.poster_path;
 			})[0] : null;
 
-			cache = Lampa.Storage.cache('dlna_tmdb_match', 500, {});
-			cache[key] = found ? { type: found.media_type, id: found.id, poster: found.poster_path } : { miss: 1 };
-			Lampa.Storage.set('dlna_tmdb_match', cache);
+			cache = Lampa.Storage.cache('dlna_tmdb_match2', 500, {});
+			cache[key] = found ? {
+				type: found.media_type,
+				id: found.id,
+				poster: found.poster_path,
+				name: found.name || found.title || ''
+			} : { miss: 1 };
+			Lampa.Storage.set('dlna_tmdb_match2', cache);
 
 			return found ? cache[key] : null;
 		},
@@ -901,6 +907,17 @@
       	component.reset();
       	var viewed = Lampa.Storage.cache('online_view', 5000, []);
       	var last_episode = component.getLastEpisode(items);
+
+        /**
+         * Что показать в плеере: название серии, если оно найдено, иначе имя файла
+         */
+      	var playerTitle = function (el) {
+      		var data = el.season && episodes[el.season] ? episodes[el.season][el.episode] : null;
+      		if (data && data.name) return episodeTitle(object.movie.title || object.movie.name, el.season, el.episode, data.name);
+
+      		return el.season ? el.title : object.movie.title + ' / ' + el.title;
+      	};
+
       	items.forEach(function (element) {
       		// имя файла оставляем как есть - оно информативнее, чем 'S1 / Серия 2'
       		element.info = element.season ? ' / S' + element.season + 'E' + element.episode : '';
@@ -958,14 +975,14 @@
       					url: extra.file,
                 // quality: extra.quality,
       					timeline: view,
-      					title: element.season ? element.title : object.movie.title + ' / ' + element.title
+      					title: playerTitle(element)
       				};
 
       				if (element.season) {
       					items.forEach(function (elem) {
       						var ex = getFile(elem);
       						playlist.push({
-      							title: elem.title,
+      							title: playerTitle(elem),
       							url: ex.file,
                     // quality: ex.quality,
       							timeline: elem.timeline
@@ -1237,6 +1254,14 @@
     	return '<span class="dlna-warn">⚠ ' + minutes + ' ≠ ' + runtime + ' ' + Lampa.Lang.translate('dlna_minutes') + '</span>';
     }
 
+    /**
+     * Заголовок для плеера: "Игра престолов / S01E03 · Лорд Сноу" вместо имени файла
+     */
+    function episodeTitle(show, season, episode, name) {
+    	var label = 'S' + ('0' + season).slice(-2) + 'E' + ('0' + episode).slice(-2);
+    	return (show ? show + ' / ' : '') + label + (name ? ' · ' + name : '');
+    }
+
     function dateHuman(date) {
     	if (!date) return '';
     	var parsed = Lampa.Utils.parseTime ? Lampa.Utils.parseTime(date) : null;
@@ -1466,6 +1491,16 @@
     		return data ? { season: se.season, number: se.episode, data: data } : null;
     	};
 
+      /**
+       * Что показать в плеере: название серии, если оно найдено, иначе имя файла
+       */
+    	this.playerTitle = function (node) {
+    		var episode = this.episodeInfo(node);
+    		if (!episode || !episode.data.name) return node.title;
+
+    		return episodeTitle(show && show.name, episode.season, episode.number, episode.data.name);
+    	};
+
     	this.sortByTitle = function (list) {
     		return list.slice().sort(function (a, b) {
     			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
@@ -1557,18 +1592,20 @@
     			if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     		}
 
+    		var _this = this;
+
     		item.on('hover:enter', function () {
     			if (!can_play) return Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_cantplay'));
 
     			var playlist = playlist_source.map(function (n) {
     				return {
-    					title: n.title,
+    					title: _this.playerTitle(n),
     					url: DLNA.getProxyURL(n.url),
     					timeline: Lampa.Timeline.view(DLNA.fileHash(n))
     				};
     			});
     			var first = {
-    				title: node.title,
+    				title: _this.playerTitle(node),
     				url: url,
     				timeline: view
     			};
