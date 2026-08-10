@@ -416,6 +416,17 @@
 			return ('0' + d.getDate()).slice(-2) + '.' + ('0' + (d.getMonth() + 1)).slice(-2) + '.' + d.getFullYear();
 		},
 
+		// '0:58:55.072' -> секунды
+		durationSeconds: function (value) {
+			var parts = String(value || '').split(':');
+			if (parts.length < 2) return 0;
+
+			var sec = 0;
+			for (var i = 0; i < parts.length; i++) sec = sec * 60 + parseFloat(parts[i]);
+
+			return isNaN(sec) ? 0 : sec;
+		},
+
 		humanSize: function (bytes) {
 			var size = parseInt(bytes);
 			if (!size || isNaN(size)) return '';
@@ -444,8 +455,12 @@
 			});
 		},
 
-		params: function () {
-			return 'api_key=' + Lampa.TMDB.key() + '&language=' + Lampa.Storage.get('language', 'ru');
+		lang: function () {
+			return Lampa.Storage.get('language', 'ru');
+		},
+
+		params: function (lang) {
+			return 'api_key=' + Lampa.TMDB.key() + '&language=' + (lang || TMDB.lang());
 		},
 
 		image: function (path, size) {
@@ -474,16 +489,7 @@
 			return found ? cache[key] : null;
 		},
 
-		/**
-		 * Кадры, названия, рейтинг и даты всех серий сезона - одним запросом
-		 */
-		season: async function (id, season) {
-			var key = id + '_' + season;
-
-			var cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
-			if (cache[key]) return cache[key];
-
-			var json = await TMDB.request('tv/' + id + '/season/' + season + '?' + TMDB.params());
+		mapEpisodes: function (json) {
 			var episodes = {};
 
 			if (json && json.episodes) json.episodes.forEach(function (e) {
@@ -491,9 +497,52 @@
 					still: e.still_path || '',
 					name: e.name || '',
 					rating: e.vote_average || 0,
-					date: e.air_date || ''
+					date: e.air_date || '',
+					runtime: e.runtime || 0,
+					overview: e.overview || '' // только признак наличия перевода, в кеш не кладём
 				};
 			});
+
+			return episodes;
+		},
+
+		// без перевода TMDB отдаёт заглушку вида "Эпизод 5" и пустое описание
+		isPlaceholder: function (name) {
+			return !name || /^(эпизод|серия|episode)\s*\d+$/i.test(name.trim());
+		},
+
+		needTranslation: function (episodes) {
+			var list = Object.keys(episodes);
+			if (!list.length) return false;
+
+			var placeholders = list.filter(function (n) { return TMDB.isPlaceholder(episodes[n].name); }).length;
+			var empty = list.filter(function (n) { return !episodes[n].overview; }).length;
+
+			return placeholders > 0 || empty === list.length;
+		},
+
+		/**
+		 * Кадры, названия, рейтинг, даты и длительности всех серий сезона - одним запросом
+		 */
+		season: async function (id, season) {
+			var key = id + '_' + season;
+
+			var cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
+			if (cache[key]) return cache[key];
+
+			var lang = TMDB.lang();
+			var episodes = TMDB.mapEpisodes(await TMDB.request('tv/' + id + '/season/' + season + '?' + TMDB.params(lang)));
+
+			// нет перевода - добираем англоязычные названия, иначе в списке будут "Эпизод 1, 2, 3"
+			if (lang.indexOf('en') !== 0 && TMDB.needTranslation(episodes)) {
+				var fallback = TMDB.mapEpisodes(await TMDB.request('tv/' + id + '/season/' + season + '?' + TMDB.params('en-US')));
+
+				Object.keys(episodes).forEach(function (num) {
+					if (fallback[num] && TMDB.isPlaceholder(episodes[num].name)) episodes[num].name = fallback[num].name;
+				});
+			}
+
+			Object.keys(episodes).forEach(function (num) { delete episodes[num].overview; }); // описания не показываем, место в хранилище не занимаем
 
 			cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
 			cache[key] = episodes;
@@ -887,6 +936,7 @@
       				time: element.duration ? String(element.duration).split('.')[0] : '',
       				quality: element.quality,
       				size: DLNA.humanSize(element.size),
+      				warning: runtimeWarning(element.duration, ep.runtime),
       				timeline: view
       			});
       		} else {
@@ -1170,6 +1220,23 @@
     	loadThumbs();
     }
 
+    /**
+     * Длительность файла против длительности серии в TMDB
+     *
+     * Заметное расхождение значит, что файл не тот: сдвинутая нумерация,
+     * склейка двух серий, другая версия. Стоит ноль запросов - длительность
+     * есть и у файла, и в уже полученном ответе сезона.
+     */
+    function runtimeWarning(duration, runtime) {
+    	if (!runtime) return '';
+
+    	var minutes = Math.round(DLNA.durationSeconds(duration) / 60);
+    	if (!minutes) return '';
+    	if (Math.abs(minutes - runtime) <= Math.max(3, runtime * 0.1)) return '';
+
+    	return '<span class="dlna-warn">⚠ ' + minutes + ' ≠ ' + runtime + ' ' + Lampa.Lang.translate('dlna_minutes') + '</span>';
+    }
+
     function dateHuman(date) {
     	if (!date) return '';
     	var parsed = Lampa.Utils.parseTime ? Lampa.Utils.parseTime(date) : null;
@@ -1208,6 +1275,7 @@
     	if (data.rating) info.push('★ ' + parseFloat(data.rating).toFixed(1));
     	if (data.date) info.push(dateHuman(data.date));
     	if (data.size) info.push(data.size);
+    	if (data.warning) info.push(data.warning);
     	item.find('.season-episode__info').html(info.join('<span class="season-episode-split">●</span>'));
 
     	// прогресс просмотра заменяет звёздочку - как в штатном списке серий
@@ -1229,6 +1297,7 @@
     		+ '.dlna-wide .dlna-thumb{width:4.2em}'
     		+ '.dlna-wide .dlna-item .online__title,.dlna-wide .dlna-item .online__quality{padding-left:5em}'
     		+ '.season-episode-split{margin:0 0.6em}'
+    		+ '.dlna-warn{color:#ffb74d}'
     		+ '</style>').appendTo('head');
     }
 
@@ -1342,9 +1411,34 @@
 
     		var list = Object.keys(need).slice(0, 5); // папка со всеми сезонами сразу не должна тормозить открытие
     		for (var i = 0; i < list.length; i++) {
-    			seasons[list[i]] = await TMDB.season(show.id, list[i]);
+    			var data = await TMDB.season(show.id, list[i]);
     			if (destroyed) return;
+
+    			if (this.trustSeason(files, list[i], data)) seasons[list[i]] = data;
+    			else console.log('DLNA', 'сопоставление с TMDB отклонено, сезон', list[i], '- состав папки не сходится с сезоном');
     		}
+    	};
+
+      /**
+       * Похоже ли, что папка - это именно этот сезон
+       *
+       * Ошибочное сопоставление подставит чужие названия серий, и заметить это
+       * трудно. Файлов меньше, чем серий - нормально (скачано не всё), а вот
+       * лишние файлы или номера, которых в сезоне нет - признак чужого сериала.
+       */
+    	this.trustSeason = function (files, season, episodes) {
+    		var total = Object.keys(episodes).length;
+    		if (!total) return false;
+
+    		var numbers = [];
+    		files.forEach(function (node) {
+    			var se = DLNA.episode(node);
+    			if (se && String(se.season) === String(season)) numbers.push(se.episode);
+    		});
+
+    		if (!numbers.length || numbers.length > total) return false;
+
+    		return numbers.every(function (n) { return !!episodes[n]; });
     	};
 
       /**
@@ -1432,6 +1526,7 @@
     				time: duration,
     				quality: node.resolution,
     				size: size,
+    				warning: runtimeWarning(node.duration, episode.data.runtime),
     				timeline: view
     			});
     		} else {
@@ -1669,6 +1764,13 @@
     		en: 'Folder is empty or server is unavailable',
     		zh: '文件夹为空或服务器不可用',
     		bg: 'Папката е празна или сървърът е недостъпен'
+    	},
+    	dlna_minutes: {
+    		ru: 'мин',
+    		uk: 'хв',
+    		en: 'min',
+    		zh: '分钟',
+    		bg: 'мин'
     	},
     	dlna_browser_noroot: {
     		ru: 'Папка не найдена, открыт корень сервера',
