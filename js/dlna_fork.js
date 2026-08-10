@@ -1261,6 +1261,8 @@
     		quality: data.quality || ''
     	});
 
+    	item.addClass('dlna-episode'); // метка своих строк: по ней навешиваются отступы и цвета
+
     	var box = item.find('.season-episode__img');
     	box.find('.season-episode__loader').remove(); // картинки грузим своей очередью
     	box.append('<div class="season-episode__episode-number">' + ('0' + data.number).slice(-2) + '</div>');
@@ -1304,8 +1306,10 @@
     		+ '.dlna-item .online__title,.dlna-item .online__quality{padding-left:3.2em;transition:padding-left .2s}'
     		+ '.dlna-wide .dlna-thumb{width:4.2em}'
     		+ '.dlna-wide .dlna-item .online__title,.dlna-wide .dlna-item .online__quality{padding-left:5em}'
-    		+ '.season-episode-split{margin:0 0.6em}'
-    		+ '.dlna-warn{color:#ffb74d}'
+    		// правила своих строк не должны задевать штатный список серий, поэтому всё через .dlna-episode
+    		+ '.dlna-episode{margin-bottom:1em}'
+    		+ '.dlna-episode .season-episode-split{margin:0 0.6em}'
+    		+ '.dlna-episode .dlna-warn{color:#ffb74d}'
     		+ '</style>').appendTo('head');
     }
 
