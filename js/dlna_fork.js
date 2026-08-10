@@ -802,26 +802,18 @@
 
 
       /**
-       * Сброс фильтра
-       */
-      this.reset = function () {
-      	choice.season = 0;
-      	this.show();
-      };
-
-      /**
        * Применить фильтр или сортировку
        *
-       * Сортировка в панели плоская, поэтому выбранный пункт приходит в a,
-       * а у фильтра сезонов есть подменю и пункт лежит в b.
+       * Оба списка плоские, выбранный пункт приходит в a; b появился бы только
+       * у пункта с подменю.
        */
       this.filter = function (type, a, b) {
-      	if (a.reset) return this.reset();
+      	var chosen = b || a;
 
       	if (type === 'sort') {
-      		choice.sort = a.index;
-      		Lampa.Storage.set('dlna_files_sort', a.index);
-      	} else if (b) choice[a.stype] = b.index;
+      		choice.sort = chosen.index;
+      		Lampa.Storage.set('dlna_files_sort', chosen.index);
+      	} else choice[a.stype] = chosen.index;
 
       	this.show();
       };
@@ -1103,10 +1095,6 @@
     	};
     	var last;
     	var last_filter;
-    	var filter_translate = {
-    		season: Lampa.Lang.translate('torrent_serial_season'),
-    		source: Lampa.Lang.translate('settings_rest_source')
-    	};
     	var filter_sources = ['synology'];
 
     	if (filter_sources.indexOf(balanser) == -1) {
@@ -1162,24 +1150,13 @@
       /**
        * Наполнить панель фильтра
        *
-       * Сортировка у ядра плоская, фильтр - с подменю: поэтому сезоны уходят
-       * одной группой со своим stype, а варианты порядка - простым списком.
+       * Сезоны кладём в фильтр плоским списком, без группы с подменю: выбирать
+       * тут больше нечего, а лишний экран «Сезон - Все сезоны» только мешает.
        */
     	this.filter = function (items, choose) {
-    		var select = [];
-
-    		if (items.season.length) select.push({
-    			title: filter_translate.season,
-    			subtitle: items.season[choose.season],
-    			stype: 'season',
-    			items: items.season.map(function (name, i) {
-    				return { title: name, selected: i === choose.season, index: i };
-    			})
-    		});
-
-    		if (choose.season) select.push({ title: 'Сбросить фильтр', reset: true });
-
-    		filter.set('filter', select);
+    		filter.set('filter', items.season.map(function (name, i) {
+    			return { title: name, selected: i === choose.season, index: i, stype: 'season' };
+    		}));
     		filter.set('sort', items.sort.map(function (name, i) {
     			return { title: name, selected: i === choose.sort, index: i, stype: 'sort' };
     		}));
