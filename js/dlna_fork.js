@@ -37,6 +37,11 @@
 	var ICON_PLAY = "<svg viewBox=\"0 0 128 128\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"64\" cy=\"64\" r=\"56\" stroke=\"white\" stroke-width=\"16\"/><path d=\"M90.5 64.3827L50 87.7654L50 41L90.5 64.3827Z\" fill=\"white\"/></svg>";
 	var ICON_FOLDER = "<svg viewBox=\"0 0 128 112\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect y=\"20\" width=\"128\" height=\"92\" rx=\"13\" fill=\"white\"/><path d=\"M29.9963 8H98.0037C96.0446 3.3021 91.4079 0 86 0H42C36.5921 0 31.9555 3.3021 29.9963 8Z\" fill=\"white\" fill-opacity=\"0.23\"/><rect x=\"11\" y=\"8\" width=\"106\" height=\"76\" rx=\"13\" fill=\"white\" fill-opacity=\"0.51\"/></svg>";
 
+	// без таймаута зависший сервер держит запрос до TCP-таймаута системы, а обход
+	// дерева ждёт его на каждой папке - интерфейс встаёт целиком
+	var SOAP_TIMEOUT = 8000;  // ожидание ответа от известного рабочего control-пути
+	var PROBE_TIMEOUT = 3000; // перебор кандидатов: неподходящий путь отвечает сразу или не отвечает вовсе
+
 	var CONTROL_PATHS = [
 		'ctl/ContentDir',                        // MiniDLNA (Keenetic, OpenWrt, ReadyMedia)
 		'ContentDirectory/control',              // Synology DSM
@@ -46,9 +51,91 @@
 	];
 
 	/**
+	 * Разобранные значения Storage
+	 *
+	 * Lampa.Storage.cache() парсит JSON при каждом вызове, а списки просмотра и
+	 * связки хешей читаются на каждую строку списка - на сотне файлов это сотни
+	 * разборов массива в несколько тысяч записей, и интерфейс встаёт. Держим
+	 * разобранное значение до тех пор, пока ключ кто-нибудь не перезапишет.
+	 */
+	var store_cache = {};
+	var store_writing = false; // свою же запись не сбрасываем: в кеше лежит тот самый объект
+
+	var BROWSE_PARALLEL = 4;    // одновременных запросов к серверу: он же отдаёт видеопоток
+	var BROWSE_TTL = 120000;    // сколько считаем содержимое папки актуальным
+
+	var browse_cache = {}; // ключ -> { time, nodes }
+	var browse_wait = {};  // ключ -> запрос в полёте, чтобы одну папку не спрашивать дважды разом
+
+	/**
+	 * Promise.all с ограничением на число одновременных задач
+	 *
+	 * Домашний сервер обслуживает запросы фактически по одному, и он же в это
+	 * время отдаёт видеопоток - залп на весь уровень дерева только вредит.
+	 * Порядок результатов совпадает с порядком items, ошибка задачи даёт null.
+	 */
+	function pool(items, limit, work) {
+		return new Promise(function (resolve) {
+			var out = new Array(items.length);
+			var next = 0, done = 0;
+
+			if (!items.length) return resolve(out);
+
+			var run = function () {
+				if (next >= items.length) return;
+
+				var i = next++;
+				Promise.resolve()
+					.then(function () { return work(items[i], i); })
+					.catch(function () { return null; })
+					.then(function (res) {
+						out[i] = res;
+						if (++done === items.length) resolve(out);else run();
+					});
+			};
+
+			for (var i = 0; i < Math.min(limit, items.length); i++) run();
+		});
+	}
+
+	/**
 	 * Работа с DLNA-сервером: общая для поиска по карточке и для браузера по серверу
 	 */
 	var DLNA = {
+
+		/**
+		 * Lampa.Storage.cache() с запоминанием разобранного значения
+		 *
+		 * Возвращает живой объект: изменения видны всем, кто его уже получил,
+		 * поэтому после правки достаточно вызвать DLNA.save() с тем же значением.
+		 */
+		store: function (name, limit, def) {
+			if (!(name in store_cache)) store_cache[name] = Lampa.Storage.cache(name, limit, def);
+			return store_cache[name];
+		},
+
+		save: function (name, value) {
+			store_cache[name] = value;
+			store_writing = true;
+			Lampa.Storage.set(name, value);
+			store_writing = false;
+		},
+
+		dropStore: function (name) {
+			if (name) delete store_cache[name];else store_cache = {};
+		},
+
+		/**
+		 * Перечитать отметки просмотра перед построением списка
+		 *
+		 * online_view ведут и другие балансеры, а на старых сборках Лампы у
+		 * Storage нет listener - тогда об их записях узнать больше неоткуда.
+		 */
+		freshStore: function () {
+			DLNA.dropStore('online_view');
+			DLNA.dropStore('dlna_hash_link');
+			DLNA.dropStore('dlna_view_time');
+		},
 
 		// local proxy is needed for Synology NAS with old upnp sdk used (CORS restricted)
 		// UPnP/1.0, Portable SDK for UPnP devices/1.6.18: https://github.com/pupnp/pupnp/commit/542c318acff73bf9be85b886a6e447bc473f57f2
@@ -61,7 +148,7 @@
 			return url;
 		},
 
-		soapBrowse: function (serviceURL, folder_id) {
+		soapBrowse: function (serviceURL, folder_id, timeout) {
 			var soapAction = '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"';
 			var soapBody = `
 			<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -82,6 +169,7 @@
 					type: "POST",
 					dataType: "xml",
 					data: soapBody,
+					timeout: timeout || SOAP_TIMEOUT,
 					headers: {
 						"SOAPAction": soapAction,
 						"Content-Type": "text/xml"
@@ -150,9 +238,44 @@
 			return filesAndDirectories;
 		},
 
-		browse: async function (folder_id) {
+		/**
+		 * Содержимое папки сервера
+		 *
+		 * Список папки переспрашивают постоянно: корень обходят и resolvePath, и
+		 * collect, а возврат из плеера или кнопкой "назад" пересоздаёт страницу
+		 * целиком. Держим ответ пару минут - за это время библиотека не меняется,
+		 * а роутер освобождается ровно тогда, когда отдаёт видео.
+		 */
+		browse: function (folder_id) {
 			if (typeof folder_id === 'undefined') folder_id = 0;
 
+			// адрес в ключе: сменили сервер - старые списки к нему не относятся
+			var key = (Lampa.Storage.get('synology_nas_server') || '') + '#' + folder_id;
+			var hit = browse_cache[key];
+
+			if (hit && Date.now() - hit.time < BROWSE_TTL) return Promise.resolve(hit.nodes);
+			if (hit) delete browse_cache[key]; // протухло - не держим список узлов в памяти
+			if (browse_wait[key]) return browse_wait[key];
+
+			var request = DLNA.fetchBrowse(folder_id).then(function (nodes) {
+				delete browse_wait[key];
+				// пустой ответ не запоминаем: это отказ сервера, а не пустая папка
+				if (nodes.length) browse_cache[key] = { time: Date.now(), nodes: nodes };
+				return nodes;
+			}, function (e) {
+				delete browse_wait[key];
+				throw e;
+			});
+
+			browse_wait[key] = request;
+			return request;
+		},
+
+		dropBrowse: function () {
+			browse_cache = {};
+		},
+
+		fetchBrowse: async function (folder_id) {
 			var serverDLNA = Lampa.Storage.get('synology_nas_server');
 			if (!serverDLNA || serverDLNA === '') {
 				Lampa.Noty.show('DLNA: не задан адрес сервера');
@@ -168,8 +291,10 @@
 			var candidates = known ? [known].concat(CONTROL_PATHS.filter(function (p) { return p !== known; })) : CONTROL_PATHS.slice();
 
 			for (var i = 0; i < candidates.length; i++) {
+				// рабочему пути даём ответить, чужой отвечает отказом сразу или не отвечает вовсе
+				var wait = candidates[i] === known ? SOAP_TIMEOUT : PROBE_TIMEOUT;
 				var url = DLNA.getProxyURL(base + candidates[i]);
-				var xml = await DLNA.soapBrowse(url, folder_id);
+				var xml = await DLNA.soapBrowse(url, folder_id, wait);
 				if (xml) {
 					var parsed = DLNA.parseXml(xml);
 					if (parsed !== null) {
@@ -269,16 +394,16 @@
 		linkHash: function (file_hash, timeline_hash, viewed_hash) {
 			if (!file_hash || !timeline_hash) return;
 
-			var links = Lampa.Storage.cache('dlna_hash_link', 1000, {});
+			var links = DLNA.store('dlna_hash_link', 1000, {});
 			var cur = links[file_hash];
 			if (cur && cur.t === timeline_hash && cur.v === viewed_hash) return;
 
 			links[file_hash] = { t: timeline_hash, v: viewed_hash };
-			Lampa.Storage.set('dlna_hash_link', links);
+			DLNA.save('dlna_hash_link', links);
 		},
 
 		linkedHash: function (file_hash) {
-			return file_hash ? (Lampa.Storage.cache('dlna_hash_link', 1000, {})[file_hash] || null) : null;
+			return file_hash ? (DLNA.store('dlna_hash_link', 1000, {})[file_hash] || null) : null;
 		},
 
 		/**
@@ -308,13 +433,13 @@
 		syncViewed: function (hash_a, hash_b) {
 			if (!hash_a || !hash_b || hash_a === hash_b) return;
 
-			var viewed = Lampa.Storage.cache('online_view', 5000, []);
+			var viewed = DLNA.store('online_view', 5000, []);
 			var has_a = viewed.indexOf(hash_a) !== -1;
 			var has_b = viewed.indexOf(hash_b) !== -1;
 			if (has_a === has_b) return;
 
 			viewed.push(has_a ? hash_b : hash_a);
-			Lampa.Storage.set('online_view', viewed);
+			DLNA.save('online_view', viewed);
 		},
 
 		/**
@@ -341,7 +466,7 @@
 		/**
 		 * Собрать содержимое ветки: папки с видео и отдельные файлы, лежащие по пути
 		 *
-		 * Обход идёт по уровням (все запросы уровня - параллельно). Папка, у которой
+		 * Обход идёт по уровням, запросы уровня - пачками по BROWSE_PARALLEL. Папка, у которой
 		 * нет подпапок, становится карточкой; папка с подпапками "прозрачная" -
 		 * её файлы поднимаются наверх, а подпапки обходятся дальше. Так виртуальные
 		 * разделы DLNA (Video / Folders / ...) не мешают увидеть реальную библиотеку.
@@ -367,7 +492,7 @@
 			var queue = [{ id: start_id, node: null }]; // node null - стартовая папка, всегда прозрачная
 
 			for (var d = 0; d < depth && queue.length; d++) {
-				var lists = await Promise.all(queue.map(function (entry) { return DLNA.browse(entry.id); }));
+				var lists = await pool(queue, BROWSE_PARALLEL, function (entry) { return DLNA.browse(entry.id); });
 				var next = [];
 
 				queue.forEach(function (entry, i) {
@@ -402,7 +527,7 @@
 		 * Когда файл/папку смотрели в последний раз
 		 */
 		viewTimes: function () {
-			return Lampa.Storage.cache('dlna_view_time', 500, {});
+			return DLNA.store('dlna_view_time', 500, {});
 		},
 
 		markView: function () {
@@ -411,7 +536,7 @@
 			for (var i = 0; i < arguments.length; i++) {
 				if (arguments[i]) times[String(arguments[i]).toLowerCase()] = now;
 			}
-			Lampa.Storage.set('dlna_view_time', times);
+			DLNA.save('dlna_view_time', times);
 		},
 
 		viewTime: function (key) {
@@ -484,7 +609,7 @@
 			if (!key) return null;
 
 			// ключ с цифрой: в старом кеше не было названия, а оно нужно для заголовка в плеере
-			var cache = Lampa.Storage.cache('dlna_tmdb_match2', 500, {});
+			var cache = DLNA.store('dlna_tmdb_match2', 500, {});
 			if (cache[key]) return cache[key].miss ? null : cache[key];
 
 			var json = await TMDB.request('search/multi?' + TMDB.params() + '&query=' + encodeURIComponent(key));
@@ -492,14 +617,14 @@
 				return (r.media_type === 'tv' || r.media_type === 'movie') && r.poster_path;
 			})[0] : null;
 
-			cache = Lampa.Storage.cache('dlna_tmdb_match2', 500, {});
+			cache = DLNA.store('dlna_tmdb_match2', 500, {}); // за время запроса ключ мог смениться целиком
 			cache[key] = found ? {
 				type: found.media_type,
 				id: found.id,
 				poster: found.poster_path,
 				name: found.name || found.title || ''
 			} : { miss: 1 };
-			Lampa.Storage.set('dlna_tmdb_match2', cache);
+			DLNA.save('dlna_tmdb_match2', cache);
 
 			return found ? cache[key] : null;
 		},
@@ -542,7 +667,7 @@
 		season: async function (id, season) {
 			var key = id + '_' + season;
 
-			var cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
+			var cache = DLNA.store('dlna_tmdb_episodes', 200, {});
 			if (cache[key]) return cache[key];
 
 			var lang = TMDB.lang();
@@ -559,9 +684,9 @@
 
 			Object.keys(episodes).forEach(function (num) { delete episodes[num].overview; }); // описания не показываем, место в хранилище не занимаем
 
-			cache = Lampa.Storage.cache('dlna_tmdb_episodes', 200, {});
+			cache = DLNA.store('dlna_tmdb_episodes', 200, {}); // за время запросов ключ мог смениться целиком
 			cache[key] = episodes;
-			Lampa.Storage.set('dlna_tmdb_episodes', cache);
+			DLNA.save('dlna_tmdb_episodes', cache);
 
 			return episodes;
 		}
@@ -902,11 +1027,8 @@
       	component.filter(filter_items, choice);
       }
 
-      /**
-       * Имена файлов сравниваем по-человечески: "Серия 2" раньше "Серии 10"
-       */
       function byTitle(a, b) {
-      	return String(a.title).localeCompare(String(b.title), undefined, { numeric: true });
+      	return compareTitle(a.title, b.title);
       }
 
       /**
@@ -961,7 +1083,8 @@
       	// console.log('Synology NAS', 'append', items);
 
       	component.reset();
-      	var viewed = Lampa.Storage.cache('online_view', 5000, []);
+      	DLNA.freshStore(); // список строится по свежим данным, дальше по проходу читаем уже разобранное
+      	var viewed = DLNA.store('online_view', 5000, []);
       	var last_episode = component.getLastEpisode(items);
 
       	// когда на экране несколько сезонов, номер серии без сезона ни о чём не говорит
@@ -995,7 +1118,7 @@
       			DLNA.linkHash(hash_path, hash, hash_file);
       			DLNA.syncTimeline(hash, hash_path);
       			DLNA.syncViewed(hash_file, hash_path);
-      			viewed = Lampa.Storage.cache('online_view', 5000, []);
+      			viewed = DLNA.store('online_view', 5000, []); // обычно тот же массив, но запись могла его перечитать
       		}
 
       		var view = Lampa.Timeline.view(hash);
@@ -1063,7 +1186,7 @@
       					viewed.push(hash_file);
       					// у нативной строки серии роль отметки играет полоса прогресса
       					if (!ep) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
-      					Lampa.Storage.set('online_view', viewed);
+      					DLNA.save('online_view', viewed);
       				}
       				item.addClass(VIEWED_CLASS);
       				DLNA.syncViewed(hash_file, hash_path);
@@ -1323,6 +1446,20 @@
     }
 
     /**
+     * Имена файлов сравниваем по-человечески: "Серия 2" раньше "Серии 10"
+     *
+     * Collator создаём один раз: localeCompare с опциями строит его заново на
+     * каждое сравнение, а в сортировке сотни файлов дают тысячи сравнений.
+     */
+    var title_collator = window.Intl && Intl.Collator ? new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }) : null;
+
+    function compareTitle(a, b) {
+    	a = String(a || '');
+    	b = String(b || '');
+    	return title_collator ? title_collator.compare(a, b) : a.localeCompare(b);
+    }
+
+    /**
      * Длительность файла против длительности серии в TMDB
      *
      * Заметное расхождение значит, что файл не тот: сдвинутая нумерация,
@@ -1532,6 +1669,8 @@
     		if (destroyed) return;
 
     		var _this = this;
+    		DLNA.freshStore(); // список строится по свежим данным, дальше по проходу читаем уже разобранное
+
     		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
     		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
 
@@ -1632,17 +1771,25 @@
 
     	this.sortByTitle = function (list) {
     		return list.slice().sort(function (a, b) {
-    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    			return compareTitle(a.title, b.title);
     		});
     	};
 
+    	/**
+    	 * Время просмотра берём по разу на строку, а не на каждое сравнение:
+    	 * сортировка сотни файлов иначе дёргает хранилище тысячи раз
+    	 */
     	this.sortByView = function (list) {
-    		return list.slice().sort(function (a, b) {
-    			var ta = DLNA.viewTime(a.title);
-    			var tb = DLNA.viewTime(b.title);
-    			if (ta !== tb) return tb - ta; // непросмотренные (0) уходят вниз и там сортируются по имени
-    			return (a.title || '').localeCompare(b.title || '', undefined, { numeric: true, sensitivity: 'base' });
+    		var keyed = list.map(function (node) {
+    			return { node: node, time: DLNA.viewTime(node.title) };
     		});
+
+    		keyed.sort(function (a, b) {
+    			if (a.time !== b.time) return b.time - a.time; // непросмотренные (0) уходят вниз и там сортируются по имени
+    			return compareTitle(a.node.title, b.node.title);
+    		});
+
+    		return keyed.map(function (entry) { return entry.node; });
     	};
 
     	this.appendFolder = function (node) {
@@ -1687,7 +1834,7 @@
     			DLNA.syncViewed(hash, link.v);
     		}
 
-    		var viewed = Lampa.Storage.cache('online_view', 5000, []);
+    		var viewed = DLNA.store('online_view', 5000, []);
     		var view = Lampa.Timeline.view(hash);
     		var episode = this.episodeInfo(node);
     		var item;
@@ -1752,7 +1899,7 @@
     				viewed.push(hash);
     				// у нативной строки серии роль отметки играет полоса прогресса
     				if (!episode) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
-    				Lampa.Storage.set('online_view', viewed);
+    				DLNA.save('online_view', viewed);
     			}
     			item.addClass(VIEWED_CLASS);
     			if (link) DLNA.syncViewed(hash, link.v);
@@ -2015,6 +2162,7 @@
 
     	item.on('hover:enter', function () {
     		resetTemplates();
+    		DLNA.dropBrowse(); // вход из меню - это и есть "обновить": содержимое сервера перечитываем
     		Lampa.Component.add('dlna_browser', browser);
     		Lampa.Activity.push({
     			url: '',
@@ -2027,9 +2175,12 @@
     	placeMenuItem(item);
     }
 
-    // смена настройки переставляет уже добавленный пункт, перезапуск не нужен
     if (Lampa.Storage.listener) Lampa.Storage.listener.follow('change', function (e) {
+    	// смена настройки переставляет уже добавленный пункт, перезапуск не нужен
     	if (e.name === 'dlna_menu_position') placeMenuItem($('.menu .menu__item[data-action="dlna_browser"]'));
+
+    	// ключ переписали снаружи (другой плагин, синхронизация с аккаунтом) - разбираем заново
+    	if (!store_writing) DLNA.dropStore(e.name);
     });
 
     if (window.appready) addMenuItem();
