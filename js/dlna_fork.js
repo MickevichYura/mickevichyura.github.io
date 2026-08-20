@@ -374,11 +374,20 @@
 		 * Один и тот же файл получает разные ObjectID в разных разделах сервера
 		 * (All Video, Recently Added, обычная папка), поэтому id брать нельзя -
 		 * иначе прогресс просмотра у одного файла будет свой в каждом разделе.
-		 * Путь ресурса от раздела не зависит.
+		 *
+		 * Ссылка на ресурс тоже не подходит, хотя и выглядит путём: у MiniDLNA
+		 * это /MediaItems/<номер ряда в базе>.<ext>. Стоит удалить пару сезонов
+		 * и дать серверу пересобрать базу - освободившиеся номера достаются
+		 * оставшимся файлам, а вместе с ними уезжают чужие отметки и таймкоды.
+		 *
+		 * Имя и размер переживают и переиндексацию, и переезд между разделами.
 		 */
 		fileKey: function (node) {
-			var path = (node.url || node.path || '').replace(/^[a-z]+:\/\/[^\/]+/i, '');
-			return path || node.title || '';
+			var title = (node.title || '').trim();
+			if (title) return title + '|' + (node.size || node.duration || '');
+
+			// файла без имени быть не должно, но ключ нужен хоть какой-то
+			return (node.url || node.path || '').replace(/^[a-z]+:\/\/[^\/]+/i, '');
 		},
 
 		fileHash: function (node) {
@@ -440,6 +449,53 @@
 
 			viewed.push(has_a ? hash_b : hash_a);
 			DLNA.save('online_view', viewed);
+		},
+
+		isViewed: function (hashes) {
+			var viewed = DLNA.store('online_view', 5000, []);
+			return hashes.filter(Boolean).some(function (hash) { return viewed.indexOf(hash) !== -1; });
+		},
+
+		/**
+		 * Поставить или снять отметку сразу на всех ключах файла
+		 *
+		 * syncViewed умеет только раздавать отметку дальше, поэтому снимать её
+		 * нужно везде разом: иначе следующий же рендер списка вернёт её обратно
+		 * со второго ключа.
+		 */
+		setViewed: function (hashes, state) {
+			var viewed = DLNA.store('online_view', 5000, []);
+			var changed = false;
+
+			hashes.filter(Boolean).forEach(function (hash) {
+				var at = viewed.indexOf(hash);
+
+				if (state && at === -1) {
+					viewed.push(hash);
+					changed = true;
+				}
+				if (!state && at !== -1) {
+					viewed.splice(at, 1);
+					changed = true;
+				}
+			});
+
+			if (changed) DLNA.save('online_view', viewed);
+		},
+
+		/**
+		 * Сбросить прогресс на всех ключах файла: чужая отметка приезжает вместе
+		 * с чужим таймкодом, снять надо и то, и другое
+		 */
+		resetTimeline: function (hashes) {
+			hashes.filter(Boolean).forEach(function (hash) {
+				var view = Lampa.Timeline.view(hash);
+				if (!view.percent && !view.time) return;
+
+				view.percent = 0;
+				view.time = 0;
+				Lampa.Timeline.update(view);
+			});
 		},
 
 		/**
@@ -1102,6 +1158,43 @@
       		return el.season ? el.title : object.movie.title + ' / ' + el.title;
       	};
 
+      	var painters = []; // строки на экране: нужны, чтобы разом почистить сезон
+
+      	/**
+      	 * Ключи файла: таймлайн и отметка карточки считаются по сезону и серии
+      	 * (так прогресс общий с другими балансерами), ключ страницы DLNA - по файлу
+      	 */
+      	var fileKeys = function (el) {
+      		// + title: иначе все файлы карточки делят один таймкод
+      		var plain = object.movie.original_title + el.title;
+      		var timeline = Lampa.Utils.hash(el.season ? [el.season, el.episode, object.movie.original_title].join('') : plain);
+      		var viewed_hash = Lampa.Utils.hash(el.season ? [el.season, el.episode, object.movie.original_title, VOICE].join('') : plain);
+      		var path = el.path ? DLNA.fileHash(el) : '';
+
+      		return { timeline: [timeline, path], viewed: [viewed_hash, path] };
+      	};
+
+      	/**
+      	 * Снять отметки со всего сезона: руками это десяток строк подряд
+      	 */
+      	var seasonAction = function (element) {
+      		return function () {
+      			return [{
+      				title: Lampa.Lang.translate('dlna_view_season') + ' ' + element.season,
+      				run: function () {
+      					painters.forEach(function (row) {
+      						if (row.element.season !== element.season) return;
+
+      						var keys = fileKeys(row.element);
+      						DLNA.setViewed(keys.viewed, false);
+      						DLNA.resetTimeline(keys.timeline);
+      						row.paint(false);
+      					});
+      				}
+      			}];
+      		};
+      	};
+
       	items.forEach(function (element) {
       		// имя файла оставляем как есть - оно информативнее, чем 'S1 / Серия 2'
       		element.info = element.season ? ' / S' + element.season + 'E' + element.episode : '';
@@ -1109,9 +1202,10 @@
       			element.translate_episode_end = last_episode;
       			element.translate_voice = VOICE;
       		}
-      		var hash = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title].join('') : object.movie.original_title + element.title); // + title: иначе все файлы карточки делят один таймкод
-      		var hash_file = Lampa.Utils.hash(element.season ? [element.season, element.episode, object.movie.original_title, VOICE].join('') : object.movie.original_title + element.title);
-      		var hash_path = element.path ? DLNA.fileHash(element) : ''; // ключ того же файла на странице DLNA
+      		var keys = fileKeys(element);
+      		var hash = keys.timeline[0];
+      		var hash_file = keys.viewed[0];
+      		var hash_path = keys.timeline[1]; // ключ того же файла на странице DLNA
 
       		if (hash_path) {
       			// карточка - единственное место, где известны оба ключа одного файла
@@ -1151,6 +1245,13 @@
       			if (viewed.indexOf(hash_file) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
       		}
       		markViewed(item, viewed.indexOf(hash_file) !== -1, view);
+
+      		var paint = function (is_viewed) {
+      			paintViewed(item, is_viewed, view, !ep);
+      		};
+      		painters.push({ element: element, paint: paint });
+      		viewedMenu(item, keys, paint, element.season ? seasonAction(element) : null);
+
       		item.on('hover:enter', function () {
       			if (object.movie.id) Lampa.Favorite.add('history', object.movie, 100);
             // console.log('Synology NAS', 'hover:enter', element);
@@ -1505,6 +1606,64 @@
 
     	item.addClass(VIEWED_CLASS);
     	if (percent > 0 && percent < VIEWED_DONE) item.addClass(UNFINISHED_CLASS);
+    }
+
+    /**
+     * Меню строки по долгому нажатию: поправить отметку просмотра руками
+     *
+     * Отметку ставит плеер, а снять её было нечем. Между тем ошибиться она
+     * может не только по вине пользователя: файл, получивший на сервере номер
+     * удалённого, приезжает с его отметкой и его таймкодом.
+     *
+     * @param {Object} keys ключи этого файла: {timeline: [], viewed: []} - на карточке
+     *                      и на странице DLNA у одного файла они разные
+     * @param {Function} paint перерисовать строку под новое состояние
+     * @param {Function} extra дополнительные пункты меню, если строка их поддерживает
+     */
+    function viewedMenu(item, keys, paint, extra) {
+    	item.on('hover:long', function () {
+    		var is_viewed = DLNA.isViewed(keys.viewed);
+    		var view = Lampa.Timeline.view(keys.timeline[0]);
+
+    		var menu = [{
+    			title: Lampa.Lang.translate(is_viewed ? 'dlna_view_off' : 'dlna_view_on'),
+    			run: function () { DLNA.setViewed(keys.viewed, !is_viewed); }
+    		}];
+
+    		if (view.percent) menu.push({
+    			title: Lampa.Lang.translate('dlna_view_reset'),
+    			run: function () { DLNA.resetTimeline(keys.timeline); }
+    		});
+
+    		if (extra) menu = menu.concat(extra());
+
+    		Lampa.Select.show({
+    			title: Lampa.Lang.translate('dlna_view_action'),
+    			items: menu,
+    			onBack: function () {
+    				Lampa.Controller.toggle('content');
+    			},
+    			onSelect: function (action) {
+    				action.run();
+    				paint(DLNA.isViewed(keys.viewed));
+    				Lampa.Controller.toggle('content');
+    			}
+    		});
+    	});
+    }
+
+    /**
+     * Привести строку к состоянию отметки. У строки серии роль отметки играет
+     * полоса прогресса, у обычной - звёздочка, поэтому звезду ставим не всем.
+     */
+    function paintViewed(item, is_viewed, timeline, star) {
+    	var percent = timeline ? timeline.percent : 0;
+
+    	item.find('.torrent-item__viewed').remove();
+    	if (is_viewed && star) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
+
+    	item.toggleClass(VIEWED_CLASS, !!(is_viewed || percent));
+    	item.toggleClass(UNFINISHED_CLASS, percent > 0 && percent < VIEWED_DONE);
     }
 
     /**
@@ -1869,6 +2028,12 @@
     			if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     		}
     		markViewed(item, viewed.indexOf(hash) !== -1, view);
+    		viewedMenu(item, {
+    			timeline: [hash, link ? link.t : ''],
+    			viewed: [hash, link ? link.v : '']
+    		}, function (is_viewed) {
+    			paintViewed(item, is_viewed, view, !episode);
+    		});
 
     		var _this = this;
 
@@ -2115,6 +2280,41 @@
     		en: 'This file cannot be played',
     		zh: '无法播放此文件',
     		bg: 'Този файл не може да бъде възпроизведен'
+    	},
+    	dlna_view_action: {
+    		ru: 'Отметка просмотра',
+    		uk: 'Позначка перегляду',
+    		en: 'Watched mark',
+    		zh: '观看标记',
+    		bg: 'Отметка за гледане'
+    	},
+    	dlna_view_on: {
+    		ru: 'Отметить просмотренным',
+    		uk: 'Позначити переглянутим',
+    		en: 'Mark as watched',
+    		zh: '标记为已观看',
+    		bg: 'Отбележи като гледано'
+    	},
+    	dlna_view_off: {
+    		ru: 'Снять отметку просмотра',
+    		uk: 'Зняти позначку перегляду',
+    		en: 'Remove watched mark',
+    		zh: '取消已观看标记',
+    		bg: 'Премахни отметката'
+    	},
+    	dlna_view_reset: {
+    		ru: 'Сбросить прогресс',
+    		uk: 'Скинути прогрес',
+    		en: 'Reset progress',
+    		zh: '重置进度',
+    		bg: 'Нулирай прогреса'
+    	},
+    	dlna_view_season: {
+    		ru: 'Очистить весь сезон',
+    		uk: 'Очистити весь сезон',
+    		en: 'Clear whole season',
+    		zh: '清除整季',
+    		bg: 'Изчисти целия сезон'
     	}
     });
     function resetTemplates() {
@@ -2124,9 +2324,25 @@
     	// вариант с кадром-превью: используется, только если сервер отдал миниатюры
     	Lampa.Template.add('dlna_thumb', "<div class=\"online selector\">\n        <div class=\"online__body\">\n            <div class=\"dlna-thumb\"></div>\n            <div class=\"online__title\">{title}</div>\n            <div class=\"online__quality\">{quality}{info}</div>\n        </div>\n    </div>");
     }
-    var button = "<div class=\"full-start__button selector view--online\" data-subtitle=\"v0.0.3\">\n    <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:svgjs=\"http://svgjs.com/svgjs\" version=\"1.1\" width=\"512\" height=\"512\" x=\"0\" y=\"0\" viewBox=\"0 0 30.051 30.051\" style=\"enable-background:new 0 0 512 512\" xml:space=\"preserve\" class=\"\">\n    <g xmlns=\"http://www.w3.org/2000/svg\">\n        <path d=\"M19.982,14.438l-6.24-4.536c-0.229-0.166-0.533-0.191-0.784-0.062c-0.253,0.128-0.411,0.388-0.411,0.669v9.069   c0,0.284,0.158,0.543,0.411,0.671c0.107,0.054,0.224,0.081,0.342,0.081c0.154,0,0.31-0.049,0.442-0.146l6.24-4.532   c0.197-0.145,0.312-0.369,0.312-0.607C20.295,14.803,20.177,14.58,19.982,14.438z\" fill=\"currentColor\"/>\n        <path d=\"M15.026,0.002C6.726,0.002,0,6.728,0,15.028c0,8.297,6.726,15.021,15.026,15.021c8.298,0,15.025-6.725,15.025-15.021   C30.052,6.728,23.324,0.002,15.026,0.002z M15.026,27.542c-6.912,0-12.516-5.601-12.516-12.514c0-6.91,5.604-12.518,12.516-12.518   c6.911,0,12.514,5.607,12.514,12.518C27.541,21.941,21.937,27.542,15.026,27.542z\" fill=\"currentColor\"/>\n    </g></svg>\n\n    <span>#{synology_nas_title}</span>\n    </div>";
+    var button = "<div class=\"full-start__button selector view--online\" data-subtitle=\"v0.0.4\">\n    <svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:svgjs=\"http://svgjs.com/svgjs\" version=\"1.1\" width=\"512\" height=\"512\" x=\"0\" y=\"0\" viewBox=\"0 0 30.051 30.051\" style=\"enable-background:new 0 0 512 512\" xml:space=\"preserve\" class=\"\">\n    <g xmlns=\"http://www.w3.org/2000/svg\">\n        <path d=\"M19.982,14.438l-6.24-4.536c-0.229-0.166-0.533-0.191-0.784-0.062c-0.253,0.128-0.411,0.388-0.411,0.669v9.069   c0,0.284,0.158,0.543,0.411,0.671c0.107,0.054,0.224,0.081,0.342,0.081c0.154,0,0.31-0.049,0.442-0.146l6.24-4.532   c0.197-0.145,0.312-0.369,0.312-0.607C20.295,14.803,20.177,14.58,19.982,14.438z\" fill=\"currentColor\"/>\n        <path d=\"M15.026,0.002C6.726,0.002,0,6.728,0,15.028c0,8.297,6.726,15.021,15.026,15.021c8.298,0,15.025-6.725,15.025-15.021   C30.052,6.728,23.324,0.002,15.026,0.002z M15.026,27.542c-6.912,0-12.516-5.601-12.516-12.514c0-6.91,5.604-12.518,12.516-12.518   c6.911,0,12.514,5.607,12.514,12.518C27.541,21.941,21.937,27.542,15.026,27.542z\" fill=\"currentColor\"/>\n    </g></svg>\n\n    <span>#{synology_nas_title}</span>\n    </div>";
 
     // нужна заглушка, а то при страте лампы говорит пусто
+
+    /**
+     * Разовая чистка хранилища при смене формата ключей
+     *
+     * Связки старых ключей ведут на ссылки ресурсов, которые сервер успел
+     * раздать другим файлам - по ним отметка расползётся на чужие серии.
+     */
+    var STORE_VERSION = 2; // 2: ключ файла считается по имени и размеру, а не по ссылке
+
+    function migrateStore() {
+    	if (parseInt(Lampa.Storage.get('dlna_store_version', '0'), 10) >= STORE_VERSION) return;
+
+    	DLNA.save('dlna_hash_link', {});
+    	Lampa.Storage.set('dlna_store_version', STORE_VERSION);
+    }
+    migrateStore();
 
     Lampa.Component.add('synology_nas', component);
     Lampa.Component.add('dlna_browser', browser);
