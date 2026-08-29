@@ -23,6 +23,7 @@
 	var BROWSER_ROOT  = 'Video'; // с какой папки сервера начинается страница DLNA
 	var TREE_DEPTH    = 4;       // глубина сбора дерева для главной страницы
 	var TREE_MAX_NODE = 100;     // сколько папок максимум обходим за один уровень
+	var PAGE_ROWS = 60;          // сколько строк рисуем за раз: остальные - по мере прокрутки
 
 	// порядок строк в списке файлов карточки; первый вариант - по умолчанию
 	var FILE_SORTS = [
@@ -33,6 +34,7 @@
 
 	var THUMB_PARALLEL = 4;    // сколько превью тянем одновременно, чтобы не завалить сервер
 	var TMDB_MAX_LOOKUP = 40;  // сколько поисков TMDB максимум на один список
+	var TMDB_PARALLEL = 4;     // сколько поисков ведём одновременно
 
 	var ICON_PLAY = "<svg viewBox=\"0 0 128 128\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"64\" cy=\"64\" r=\"56\" stroke=\"white\" stroke-width=\"16\"/><path d=\"M90.5 64.3827L50 87.7654L50 41L90.5 64.3827Z\" fill=\"white\"/></svg>";
 	var ICON_FOLDER = "<svg viewBox=\"0 0 128 112\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect y=\"20\" width=\"128\" height=\"92\" rx=\"13\" fill=\"white\"/><path d=\"M29.9963 8H98.0037C96.0446 3.3021 91.4079 0 86 0H42C36.5921 0 31.9555 3.3021 29.9963 8Z\" fill=\"white\" fill-opacity=\"0.23\"/><rect x=\"11\" y=\"8\" width=\"106\" height=\"76\" rx=\"13\" fill=\"white\" fill-opacity=\"0.51\"/></svg>";
@@ -64,8 +66,21 @@
 	var BROWSE_PARALLEL = 4;    // одновременных запросов к серверу: он же отдаёт видеопоток
 	var BROWSE_TTL = 120000;    // сколько считаем содержимое папки актуальным
 
+	// поля узла, без которых не нарисовать строку и не запустить файл
+	var SNAP_FIELDS = ['id', 'title', 'type', 'size', 'duration', 'resolution', 'url', 'childCount', 'upnp:episodeSeason', 'upnp:episodeNumber'];
+
 	var browse_cache = {}; // ключ -> { time, nodes }
 	var browse_wait = {};  // ключ -> запрос в полёте, чтобы одну папку не спрашивать дважды разом
+	var tree_stale = false; // снимок главной страницы пора перечитать
+
+	/**
+	 * Почему сервер не отдал список
+	 *
+	 * 'noserver' - адрес не задан, 'unreachable' - до сервера не достучались,
+	 * 'nocontrol' - сервер отвечает, но список не отдаёт ни по одному пути.
+	 * Пустая страница про это молчала, а чинится каждый случай по-своему.
+	 */
+	var last_error = null;
 
 	/**
 	 * Promise.all с ограничением на число одновременных задач
@@ -135,6 +150,7 @@
 			DLNA.dropStore('online_view');
 			DLNA.dropStore('dlna_hash_link');
 			DLNA.dropStore('dlna_view_time');
+			DLNA.dropStore('dlna_folder_seen');
 		},
 
 		// local proxy is needed for Synology NAS with old upnp sdk used (CORS restricted)
@@ -148,6 +164,15 @@
 			return url;
 		},
 
+		/**
+		 * Запрос списка папки к одному control-пути
+		 *
+		 * Вместе с ответом отдаём HTTP-статус: по нему видно, промолчал сервер
+		 * (сети нет, адрес не тот, CORS) или ответил, но не тем - причины разные,
+		 * и чинят их по-разному.
+		 *
+		 * @returns {Promise<{xml: String|null, status: Number}>}
+		 */
 		soapBrowse: function (serviceURL, folder_id, timeout) {
 			var soapAction = '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"';
 			var soapBody = `
@@ -174,11 +199,14 @@
 						"SOAPAction": soapAction,
 						"Content-Type": "text/xml"
 					},
-					success: function (response) {
-						resolve(response && response.documentElement ? response.documentElement.outerHTML : null);
+					success: function (response, state, xhr) {
+						resolve({
+							xml: response && response.documentElement ? response.documentElement.outerHTML : null,
+							status: xhr ? xhr.status : 200
+						});
 					},
-					error: function () {
-						resolve(null);
+					error: function (xhr) {
+						resolve({ xml: null, status: xhr ? xhr.status : 0 });
 					}
 				});
 			});
@@ -273,12 +301,100 @@
 
 		dropBrowse: function () {
 			browse_cache = {};
+			tree_stale = true; // вход из меню - просьба перечитать, снимок тоже устарел
+		},
+
+		/**
+		 * Узел в том виде, в каком его хранит снимок
+		 *
+		 * Ответ сервера тащит за собой десяток res-ресурсов на файл, а строке
+		 * нужны имя, размер, длительность и ссылка. Превью сворачиваем в один
+		 * адрес - прокси к нему добавится уже при показе.
+		 */
+		packNode: function (node) {
+			var packed = { thumb: DLNA.thumbURL(node) };
+
+			SNAP_FIELDS.forEach(function (field) {
+				if (node[field]) packed[field] = node[field];
+			});
+
+			return packed;
+		},
+
+		serverKey: function () {
+			return Lampa.Storage.get('synology_nas_server') || '';
+		},
+
+		treeKey: function (root) {
+			return DLNA.serverKey() + '#' + root;
+		},
+
+		/**
+		 * Файл, на котором остановились в прошлый раз
+		 *
+		 * Прогресс лежит в таймлайне, здесь только то, чего в нём нет: сам файл,
+		 * папка, из которой он взят, и сериал, если папку удалось сопоставить.
+		 * Без этого главная страница знает лишь даты просмотра папок, а какую
+		 * серию включать - не знает.
+		 */
+		resumeSave: function (rec) {
+			rec.key = DLNA.serverKey(); // чужой сервер - чужая запись
+			Lampa.Storage.set('dlna_resume', rec);
+		},
+
+		resumeLoad: function () {
+			var rec = Lampa.Storage.get('dlna_resume', '');
+			if (!rec || rec.key !== DLNA.serverKey() || !rec.node || !rec.node.url) return null;
+
+			return rec;
+		},
+
+		/**
+		 * Снимок ветки с прошлого захода
+		 * @returns {Object|null} { time, folders, files } - null, если снимка нет
+		 *                        или он от другого сервера или другой стартовой папки
+		 */
+		treeLoad: function (root) {
+			var snap = Lampa.Storage.get('dlna_tree', '');
+			if (!snap || snap.key !== DLNA.treeKey(root) || !snap.folders) return null;
+
+			return snap;
+		},
+
+		treeSave: function (root, tree) {
+			// на огромной библиотеке хранилище может и не принять снимок - показать
+			// список это не мешает, просто следующий заход снова пойдёт по серверу
+			try {
+				Lampa.Storage.set('dlna_tree', {
+					key: DLNA.treeKey(root),
+					time: Date.now(),
+					folders: tree.folders.map(DLNA.packNode),
+					files: tree.files.map(DLNA.packNode)
+				});
+				tree_stale = false;
+			} catch (e) {
+				console.error('DLNA', 'snapshot', e);
+			}
+		},
+
+		treeStale: function (snap) {
+			return tree_stale || !snap.time || Date.now() - snap.time > BROWSE_TTL;
+		},
+
+		/**
+		 * Чем объяснить пустой список: причина последнего отказа сервера
+		 * @returns {String} пусто, если последний запрос прошёл
+		 */
+		errorText: function () {
+			if (!last_error) return '';
+
+			return Lampa.Lang.translate('dlna_err_' + last_error).replace('%s', DLNA.serverKey());
 		},
 
 		fetchBrowse: async function (folder_id) {
 			var serverDLNA = Lampa.Storage.get('synology_nas_server');
 			if (!serverDLNA || serverDLNA === '') {
-				Lampa.Noty.show('DLNA: не задан адрес сервера');
+				last_error = 'noserver';
 				console.error('DLNA', 'Не задан адрес сервера');
 				return [];
 			}
@@ -290,24 +406,28 @@
 			var known = Lampa.Storage.get('dlna_control_path', '');
 			var candidates = known ? [known].concat(CONTROL_PATHS.filter(function (p) { return p !== known; })) : CONTROL_PATHS.slice();
 
+			var answered = false; // сервер хоть чем-то ответил: значит, сеть есть, а не подошёл путь
+
 			for (var i = 0; i < candidates.length; i++) {
 				// рабочему пути даём ответить, чужой отвечает отказом сразу или не отвечает вовсе
 				var wait = candidates[i] === known ? SOAP_TIMEOUT : PROBE_TIMEOUT;
 				var url = DLNA.getProxyURL(base + candidates[i]);
-				var xml = await DLNA.soapBrowse(url, folder_id, wait);
-				if (xml) {
-					var parsed = DLNA.parseXml(xml);
+				var res = await DLNA.soapBrowse(url, folder_id, wait);
+				if (res.status) answered = true;
+				if (res.xml) {
+					var parsed = DLNA.parseXml(res.xml);
 					if (parsed !== null) {
 						if (known !== candidates[i]) {
 							Lampa.Storage.set('dlna_control_path', candidates[i]);
 							console.log('DLNA', 'control path:', candidates[i]);
 						}
+						last_error = null;
 						return parsed;
 					}
 				}
 			}
 
-			Lampa.Noty.show('DLNA: не удалось подключиться к серверу');
+			last_error = answered ? 'nocontrol' : 'unreachable';
 			console.error('DLNA', 'ни один control-путь не ответил', base, CONTROL_PATHS);
 			return [];
 		},
@@ -355,9 +475,11 @@
 		 * JPEG_TN/JPEG_SM. MiniDLNA делает превью для видео только если собран
 		 * с ffmpegthumbnailer и включён enable_thumbnail - иначе будет пусто.
 		 */
-		thumb: function (node) {
+		thumbURL: function (node) {
+			if (typeof node.thumb === 'string') return node.thumb; // узел из снимка: ресурсы в него не попадают
+
 			var art = node['upnp:albumArtURI'] || node['upnp:icon'] || '';
-			if (art) return DLNA.getProxyURL(art);
+			if (art) return art;
 
 			var list = node.resources || [];
 			var pick = list.filter(function (r) { return /JPEG_(TN|SM)/i.test(r.protocolInfo || ''); })[0];
@@ -365,7 +487,12 @@
 			// у самих картинок превью может не быть - тогда годится любой image-ресурс
 			if (!pick) pick = list.filter(function (r) { return /image\/(jpeg|png)/i.test(r.protocolInfo || ''); })[0];
 
-			return pick && pick.url ? DLNA.getProxyURL(pick.url) : '';
+			return pick && pick.url ? pick.url : '';
+		},
+
+		thumb: function (node) {
+			var url = DLNA.thumbURL(node);
+			return url ? DLNA.getProxyURL(url) : '';
 		},
 
 		/**
@@ -557,7 +684,10 @@
 					var vids = nodes.filter(DLNA.isVideo);
 
 					if (entry.node && !subs.length) {
-						if (vids.length) addFolder(entry.node, vids.length); // конечная папка с видео
+						if (vids.length) {
+							DLNA.countFolder(entry.node.title, vids); // список файлов есть только здесь
+							addFolder(entry.node, vids.length); // конечная папка с видео
+						}
 						return;
 					}
 
@@ -577,6 +707,31 @@
 			queue.forEach(function (entry) { addFolder(entry.node); });
 
 			return { folders: folders, files: files };
+		},
+
+		/**
+		 * Сколько файлов папки уже просмотрено
+		 *
+		 * Считаем там, где список файлов и так в руках - при обходе дерева и на
+		 * самой папке, - и запоминаем: главная про содержимое папок ничего не
+		 * знает, а лезть за ним на сервер ради одной строки незачем.
+		 */
+		countFolder: function (title, files) {
+			if (!title || !files.length) return;
+
+			var seen = files.filter(function (node) { return DLNA.isViewed([DLNA.fileHash(node)]); }).length;
+			var counts = DLNA.store('dlna_folder_seen', 300, {});
+			var key = String(title).toLowerCase();
+			var cur = counts[key];
+
+			if (cur && cur.s === seen && cur.t === files.length) return; // ничего не изменилось - не трогаем хранилище
+
+			counts[key] = { s: seen, t: files.length };
+			DLNA.save('dlna_folder_seen', counts);
+		},
+
+		folderSeen: function (title) {
+			return title ? (DLNA.store('dlna_folder_seen', 300, {})[String(title).toLowerCase()] || null) : null;
 		},
 
 		/**
@@ -650,6 +805,9 @@
 		}
 	};
 
+	// из чего Лампа собирает карточку в истории; остального в кеше не держим
+	var CARD_FIELDS = ['id', 'name', 'title', 'original_name', 'original_title', 'poster_path', 'backdrop_path', 'release_date', 'first_air_date', 'vote_average'];
+
 	/**
 	 * TMDB: постеры для папок, кадры и названия серий для файлов
 	 *
@@ -681,6 +839,17 @@
 		},
 
 		/**
+		 * Уже найденное совпадение, без запроса: список строится синхронно,
+		 * а к моменту запуска файла его строку обычно уже искали ради превью
+		 */
+		cached: function (title) {
+			var key = DLNA.cleanName(title || '').toLowerCase();
+			var hit = key ? DLNA.store('dlna_tmdb_match2', 500, {})[key] : null;
+
+			return hit && !hit.miss ? hit : null;
+		},
+
+		/**
 		 * Сопоставить имя папки или файла с фильмом/сериалом
 		 */
 		match: async function (title) {
@@ -701,11 +870,47 @@
 				type: found.media_type,
 				id: found.id,
 				poster: found.poster_path,
-				name: found.name || found.title || ''
+				name: found.name || found.title || '',
+				card: TMDB.toCard(found, found.media_type)
 			} : { miss: 1 };
 			DLNA.save('dlna_tmdb_match2', cache);
 
 			return found ? cache[key] : null;
+		},
+
+		/**
+		 * Ответ TMDB -> карточка, какой её ждёт Лампа
+		 *
+		 * media_type тут не для красоты: по name/title Лампа отличает сериал от
+		 * фильма, поэтому чужое поле подставлять нельзя - берём как отдал TMDB.
+		 */
+		toCard: function (json, type) {
+			var card = { source: 'tmdb', media_type: type };
+
+			CARD_FIELDS.forEach(function (field) {
+				if (json[field]) card[field] = json[field];
+			});
+
+			return card.id ? card : null;
+		},
+
+		/**
+		 * Карточка совпадения для истории
+		 *
+		 * Поиск отдаёт всё нужное сразу, но записи старого кеша карточки не
+		 * знают - для них добираем детали по id и кладём туда же.
+		 */
+		card: async function (match) {
+			if (!match || !match.id) return null;
+			if (match.card) return match.card;
+
+			var json = await TMDB.request(match.type + '/' + match.id + '?' + TMDB.params());
+			if (!json || !json.id) return null;
+
+			match.card = TMDB.toCard(json, match.type);
+			DLNA.save('dlna_tmdb_match2', DLNA.store('dlna_tmdb_match2', 500, {})); // match лежит в этом же кеше
+
+			return match.card;
 		},
 
 		mapEpisodes: function (json) {
@@ -904,9 +1109,9 @@
 			    	for (let folderName of folderNames) {
 			    		folder_id = await _this.findFolderId(filesAndDirectories, folderName);
 			    		if (folder_id === null) {
-			    			Lampa.Noty.show(`DLNA: папка "${folderName}" не найдена`);
 			    			console.error('Synology NAS', `DLNA: папка "${folderName}" не найдена`);
-			    			return;
+			    			// без этого лоадер крутится вечно: список так и не приходит
+			    			return component.empty(DLNA.errorText() || `Папка "${folderName}" не найдена на сервере`);
 			    		}
 			    		filesAndDirectories = await _this.getDLNAfiles(folder_id);
 			    	}
@@ -938,6 +1143,9 @@
 				// console.log('Synology NAS', 'processFilesAndDirectories', filesAndDirectories);
 
 				const videoItems = filesAndDirectories.filter(item => (item.type || '').indexOf('object.item.videoItem') === 0); // берем только видеофайлы
+
+				// сервер не ответил - причина понятнее, чем пустой список по запросу
+				if (!videoItems.length && DLNA.errorText()) return component.empty(DLNA.errorText());
 
 				const videoItemsBest3 = this.findSimilarTitles(search_zero, search_one, search_two, videoItems);
 
@@ -1643,23 +1851,12 @@
      * @param {Function} paint перерисовать строку под новое состояние
      * @param {Function} extra дополнительные пункты меню, если строка их поддерживает
      */
-    function viewedMenu(item, keys, paint, extra) {
+    function longMenu(item, items) {
     	item.on('hover:long', function () {
     		var enabled = Lampa.Controller.enabled().name; // куда вернуться, закрыв меню
-    		var is_viewed = DLNA.isViewed(keys.viewed);
-    		var view = Lampa.Timeline.view(keys.timeline[0]);
+    		var menu = items();
 
-    		var menu = [{
-    			title: Lampa.Lang.translate(is_viewed ? 'dlna_view_off' : 'dlna_view_on'),
-    			run: function () { DLNA.setViewed(keys.viewed, !is_viewed); }
-    		}];
-
-    		if (view.percent) menu.push({
-    			title: Lampa.Lang.translate('dlna_view_reset'),
-    			run: function () { DLNA.resetTimeline(keys.timeline); }
-    		});
-
-    		if (extra) menu = menu.concat(extra());
+    		if (!menu.length) return;
 
     		Lampa.Select.show({
     			title: Lampa.Lang.translate('title_action'),
@@ -1669,10 +1866,37 @@
     			},
     			onSelect: function (action) {
     				action.run();
-    				paint(DLNA.isViewed(keys.viewed));
     				Lampa.Controller.toggle(enabled);
     			}
     		});
+    	});
+    }
+
+    function viewedMenu(item, keys, paint, extra) {
+    	longMenu(item, function () {
+    		var is_viewed = DLNA.isViewed(keys.viewed);
+    		var view = Lampa.Timeline.view(keys.timeline[0]);
+    		var repaint = function () { paint(DLNA.isViewed(keys.viewed)); };
+
+    		var menu = [{
+    			title: Lampa.Lang.translate(is_viewed ? 'dlna_view_off' : 'dlna_view_on'),
+    			run: function () { DLNA.setViewed(keys.viewed, !is_viewed); repaint(); }
+    		}];
+
+    		if (view.percent) menu.push({
+    			title: Lampa.Lang.translate('dlna_view_reset'),
+    			run: function () { DLNA.resetTimeline(keys.timeline); repaint(); }
+    		});
+
+    		// строка перерисовывается и после чужих пунктов: они тоже правят отметки
+    		if (extra) menu = menu.concat(extra().map(function (action) {
+    			return {
+    				title: action.title,
+    				run: function () { action.run(); repaint(); }
+    			};
+    		}));
+
+    		return menu;
     	});
     }
 
@@ -1688,6 +1912,104 @@
 
     	item.toggleClass(VIEWED_CLASS, !!(is_viewed || percent));
     	item.toggleClass(UNFINISHED_CLASS, percent > 0 && percent < VIEWED_DONE);
+    }
+
+    /**
+     * Название строки списка: по нему строку находят после перерисовки
+     */
+    function rowTitle(item) {
+    	return item ? $(item).find('.online__title').text() : '';
+    }
+
+    /**
+     * Порядок серий: сезон, номер, потом имя. Нераспознанное уходит вниз
+     */
+    function orderEpisodes(list) {
+    	return list.slice().sort(function (a, b) {
+    		var ae = DLNA.episode(a), be = DLNA.episode(b);
+    		var as = ae ? ae.season : 1e6, bs = be ? be.season : 1e6;
+    		if (as !== bs) return as - bs;
+
+    		var an = ae ? ae.episode : 1e6, bn = be ? be.episode : 1e6;
+    		if (an !== bn) return an - bn;
+
+    		return compareTitle(a.title, b.title);
+    	});
+    }
+
+    /**
+     * Следующая за файлом серия, которую ещё не досмотрели
+     * @returns {Object|null} null - файла в списке нет или дальше всё просмотрено
+     */
+    function nextEpisode(list, node) {
+    	var key = DLNA.fileKey(node);
+    	var at = -1;
+
+    	list.forEach(function (item, i) {
+    		if (at === -1 && DLNA.fileKey(item) === key) at = i;
+    	});
+    	if (at === -1) return null;
+
+    	for (var i = at + 1; i < list.length; i++) {
+    		if (Lampa.Timeline.view(DLNA.fileHash(list[i])).percent < VIEWED_DONE) return list[i];
+    	}
+    	return null;
+    }
+
+    /**
+     * Заголовок для плеера по одному имени файла: список серий тут недоступен,
+     * зато известен сериал - номер серии берём из имени
+     */
+    function nodeTitle(node, show) {
+    	var se = show && show.type === 'tv' ? DLNA.episode(node) : null;
+    	return se ? episodeTitle(show.name, se.season, se.episode, '') : node.title;
+    }
+
+    /**
+     * Сколько осталось до конца: "осталось 23 мин"
+     */
+    function timeLeft(view) {
+    	if (!view || !view.duration || !view.time) return '';
+
+    	var minutes = Math.round((view.duration - view.time) / 60);
+    	if (minutes < 1) return '';
+
+    	return Lampa.Lang.translate('dlna_resume_left').replace('%s', minutes + ' ' + Lampa.Lang.translate('dlna_minutes'));
+    }
+
+    /**
+     * Отпечаток списка: по нему видно, изменилось ли содержимое ветки
+     *
+     * Сравнивать сами узлы нельзя - сервер каждый раз выдаёт свои ObjectID,
+     * а имя с размером у файла те же, что и были.
+     */
+    function treeStamp(tree) {
+    	return tree.folders.map(function (node) {
+    		return node.title + ':' + (node.childCount || '');
+    	}).concat(tree.files.map(DLNA.fileKey)).join('|');
+    }
+
+    /**
+     * Отдать просмотр в родную историю Лампы
+     *
+     * Файл с домашнего сервера ничем не хуже найденного онлайн: попав в историю,
+     * карточка встаёт на главной Лампы, и к сериалу возвращаются оттуда, а не
+     * через дерево папок. Раньше историю вела только карточка фильма, а запуск
+     * со страницы DLNA не оставлял следа нигде, кроме самой страницы.
+     *
+     * @param {Object} known совпадение TMDB, если оно уже известно списку
+     * @param {String} title имя файла или папки - когда не известно
+     */
+    function addHistory(known, title) {
+    	if (!Lampa.Favorite || !Lampa.Favorite.add) return;
+
+    	Promise.resolve(known || TMDB.cached(title) || TMDB.match(title)).then(function (match) {
+    		return match ? TMDB.card(match) : null;
+    	}).then(function (card) {
+    		if (card) Lampa.Favorite.add('history', card, 100);
+    	}).catch(function (e) {
+    		console.error('DLNA', 'history', e);
+    	});
     }
 
     /**
@@ -1781,6 +2103,8 @@
     		+ '.dlna-episode .dlna-warn{color:#ffb74d}'
     		// "2×03" длиннее обычного номера, на узком экране кадр всего 7em - уменьшаем
     		+ '.dlna-episode .dlna-num--se{font-size:0.7em}'
+    		// строка "Продолжить" стоит первой и должна читаться как приглашение, а не как файл
+    		+ '.dlna-resume .dlna-resume__label{color:#fff;font-weight:600}'
     		+ '</style>').appendTo('head');
     }
 
@@ -1802,6 +2126,14 @@
     	var show = null;   // сериал/фильм, с которым сопоставлена текущая папка
     	var seasons = {};  // серии по сезонам из TMDB
     	var multi_season = false; // в папке лежит больше одного сезона
+    	var stamp = '';    // отпечаток показанного списка: с ним сверяется фоновое обновление
+    	var resume = null; // строка "Продолжить" в самом верху главной
+    	var empty_shown = false;
+    	var force = false;   // перечитать сервер, не показывая снимок
+    	var pending = [];    // строки, которые ещё не нарисованы
+    	var tail = null;     // строка, на которой пора рисовать следующую порцию
+    	var appended = null; // последняя добавленная строка
+    	var restore = '';    // строка, на которую встать после обновления
 
     	scroll.body().addClass('torrent-list');
 
@@ -1810,7 +2142,10 @@
     	}
 
     	this.create = function () {
+    		var _this = this;
+
     		scroll.minus(); // без этого у скролла нет высоты и список не прокручивается
+    		scroll.onEnd = function () { _this.more(PAGE_ROWS); }; // прокрутили мышью до низа
     		window.addEventListener('resize', resize, false);
     		this.activity.loader(true);
     		this.build();
@@ -1821,55 +2156,39 @@
        * Загрузить и показать содержимое
        */
     	this.build = async function () {
-    		var folders = [], files = [];
+    		var _this = this;
+    		var root = object.folder_id ? '' : Lampa.Storage.get('dlna_browser_root', BROWSER_ROOT);
+    		var snapshot = root && !force ? DLNA.treeLoad(root) : null;
+
+    		force = false; // снимок пропускаем один раз - по просьбе обновиться
+    		var tree = { folders: [], files: [] };
+
+    		// строку "Продолжить" готовим параллельно: её соседи по папке - ещё один запрос,
+    		// а список из снимка рисуется без запросов вообще, и ждать его она не должна
+    		if (root) this.resumeEntry().then(function (entry) { _this.showResume(entry); });
 
     		try {
     			if (object.folder_id) {
     				var nodes = await DLNA.browse(object.folder_id);
-    				folders = nodes.filter(DLNA.isFolder);
-    				files = nodes.filter(function (n) { return !DLNA.isFolder(n); });
-    			} else {
-    				var root = Lampa.Storage.get('dlna_browser_root', BROWSER_ROOT);
-    				var root_id = await DLNA.resolvePath(root);
-
-    				if (root_id === null) {
-    					Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_noroot') + ': ' + root);
-    					root_id = '0';
-    				}
-    				var tree = await DLNA.collect(root_id, TREE_DEPTH);
-    				folders = tree.folders;
-    				files = tree.files;
+    				tree.folders = nodes.filter(DLNA.isFolder);
+    				tree.files = nodes.filter(function (n) { return !DLNA.isFolder(n); });
     			}
+    			// снимок прошлого захода показываем сразу, свежий собираем уже под показанным списком
+    			else if (snapshot) tree = snapshot;
+    			else tree = await this.collectTree(root);
     		} catch (e) {
     			console.error('DLNA', 'browse', e);
     		}
 
     		if (destroyed) return;
-    		if (!folders.length && !files.length) return this.empty();
+    		if (!tree.folders.length && !tree.files.length) return this.empty();
 
     		// сопоставляем папку с сериалом до отрисовки: иначе строки перестроятся уже на глазах
-    		if (object.folder_id && files.length) await this.matchShow(files);
+    		if (object.folder_id && tree.files.length) await this.matchShow(tree.files);
     		if (destroyed) return;
 
-    		var _this = this;
-    		DLNA.freshStore(); // список строится по свежим данным, дальше по проходу читаем уже разобранное
-
-    		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
-    		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
-
     		addBrowserStyle();
-
-    		sort(folders).forEach(function (node) {
-    			_this.appendFolder(node);
-    		});
-
-    		// плейлист по всем проигрываемым файлам списка - чтобы работал переход к следующему
-    		var sorted_files = sort(files);
-    		var playable = sorted_files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
-
-    		sorted_files.forEach(function (node) {
-    			_this.appendFile(node, playable);
-    		});
+    		this.list(tree);
 
     		this.activity.loader(false);
     		resize();
@@ -1877,6 +2196,180 @@
     		this.activity.toggle();
 
     		this.loadPreviews(); // асинхронно, список уже показан
+    		if (snapshot && DLNA.treeStale(snapshot)) this.refresh(root);
+    	};
+
+      /**
+       * Отрисовать список папок и файлов
+       */
+    	this.list = function (tree) {
+    		var _this = this;
+    		DLNA.freshStore(); // список строится по свежим данным, дальше по проходу читаем уже разобранное
+
+    		// на главной сверху то, что смотрели недавно; внутри папки - обычный порядок по имени
+    		var sort = object.folder_id ? this.sortByTitle : this.sortByView;
+    		var folders = sort(tree.folders);
+
+    		// плейлист по всем проигрываемым файлам списка - чтобы работал переход к следующему
+    		var sorted_files = sort(tree.files);
+    		var playable = sorted_files.filter(function (n) { return (DLNA.isVideo(n) || DLNA.isAudio(n)) && n.url; });
+
+    		if (object.folder_id) DLNA.countFolder(object.folder_title, playable); // здесь список точный
+
+    		// папка на пять сотен файлов целиком в DOM не помещается: приставка её рисует
+    		// секундами, а прокрутка потом дёргается. Держим наготове, рисуем порциями
+    		pending = folders.map(function (node) {
+    			return function () { _this.appendFolder(node); };
+    		}).concat(sorted_files.map(function (node) {
+    			return function () { _this.appendFile(node, playable); };
+    		}));
+
+    		// список открывается на недосмотренной серии - её надо успеть нарисовать
+    		var watched = 0;
+
+    		if (object.folder_id) sorted_files.forEach(function (node, i) {
+    			var hash = DLNA.fileHash(node);
+    			if (DLNA.isViewed([hash]) || Lampa.Timeline.view(hash).percent) watched = i + 1;
+    		});
+
+    		this.more(Math.max(PAGE_ROWS, watched ? folders.length + watched + 10 : 0));
+
+    		stamp = treeStamp(tree);
+    	};
+
+      /**
+       * Дорисовать очередную порцию строк
+       */
+    	this.more = function (count) {
+    		var chunk = pending.splice(0, count);
+    		if (!chunk.length) return;
+
+    		// следующую порцию готовим не на самой последней строке, а за десяток до неё
+    		var trigger = Math.max(0, chunk.length - 10);
+    		tail = null;
+
+    		chunk.forEach(function (paint, i) {
+    			paint();
+    			if (i === trigger) tail = appended;
+    		});
+
+    		if (!pending.length) tail = null; // рисовать больше нечего
+
+    		if (Lampa.Activity.active().activity === this.activity && Lampa.Controller.enabled().name === 'content') {
+    			Lampa.Controller.collectionSet(scroll.render());
+    		}
+
+    		this.loadPreviews(); // превью ищем только для того, что уже на экране
+    	};
+
+      /**
+       * Перечитать содержимое сервера заново
+       *
+       * Файл на сервере мог появиться или пропасть, а страница держит списки
+       * папок в кеше: до сих пор обновиться можно было только входом через меню,
+       * то есть выйдя из папки и потеряв место в ней.
+       */
+    	this.reload = function () {
+    		DLNA.dropBrowse();
+
+    		restore = rowTitle(last); // после перерисовки вернёмся на эту же строку
+    		force = true;
+    		empty_shown = false;
+    		stamp = '';
+    		last = null;
+    		tail = null;
+    		pending = [];
+    		resume = null;
+    		show = null;
+    		seasons = {};
+    		multi_season = false;
+    		rows = [];
+    		thumb_queue = [];
+
+    		scroll.clear();
+    		this.activity.loader(true);
+    		this.build();
+    	};
+
+      /**
+       * Пункт "Обновить список" в меню долгого нажатия - он есть на каждой строке
+       */
+    	this.reloadAction = function () {
+    		var _this = this;
+
+    		return [{
+    			title: Lampa.Lang.translate('dlna_reload'),
+    			run: function () { _this.reload(); }
+    		}];
+    	};
+
+      /**
+       * Обойти ветку сервера и запомнить снимок
+       */
+    	this.collectTree = async function (root) {
+    		DLNA.freshStore(); // счётчики просмотренного по папкам считаются прямо в обходе
+
+    		var root_id = await DLNA.resolvePath(root);
+
+    		if (root_id === null) {
+    			// сервер не ответил вовсе - тогда дело не в папке, и говорить надо о нём
+    			if (!DLNA.errorText()) Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_noroot') + ': ' + root);
+    			root_id = '0';
+    		}
+
+    		var tree = await DLNA.collect(root_id, TREE_DEPTH);
+    		if (tree.folders.length || tree.files.length) DLNA.treeSave(root, tree);
+
+    		return tree;
+    	};
+
+      /**
+       * Перечитать ветку в фоне и подменить список, если он изменился
+       *
+       * Снимок мог устареть: файлы добавились, папку переименовали. Перерисовываем
+       * молча и возвращаем фокус на ту же строку - иначе список прыгнет под руками.
+       */
+    	this.refresh = async function (root) {
+    		var tree;
+
+    		try {
+    			tree = await this.collectTree(root);
+    		} catch (e) {
+    			return console.error('DLNA', 'refresh', e);
+    		}
+
+    		if (destroyed) return;
+
+    		// сервер не ответил: показанный снимок и есть лучшее, что у нас есть
+    		if (!tree.folders.length && !tree.files.length) {
+    			var reason = DLNA.errorText();
+    			return reason ? Lampa.Noty.show(reason) : undefined;
+    		}
+    		if (treeStamp(tree) === stamp) return;
+
+    		var focused = rowTitle(last);
+    		// страница может быть уже не на экране: тогда фокус чужой, и трогать его нельзя
+    		var active = Lampa.Activity.active().activity === this.activity && Lampa.Controller.enabled().name === 'content';
+
+    		rows = [];
+    		thumb_queue = []; // очередь превью относится к снятому списку
+    		pending = [];
+    		tail = null;
+    		last = null;
+    		scroll.clear();
+    		this.list(tree);
+    		if (resume) this.showResume(resume);
+
+    		// та же строка могла переехать: ищем её по названию, а не по месту
+    		last = this.rowByTitle(focused) || scroll.render().find('.selector')[0];
+
+    		if (active) {
+    			Lampa.Controller.collectionSet(scroll.render());
+    			Lampa.Controller.collectionFocus(last || false, scroll.render());
+    		}
+
+    		resize();
+    		this.loadPreviews();
     	};
 
       /**
@@ -1975,11 +2468,156 @@
     		return keyed.map(function (entry) { return entry.node; });
     	};
 
-    	this.appendFolder = function (node) {
+      /**
+       * Что предложить продолжить: недосмотренный файл, а если его досмотрели -
+       * следующая серия из той же папки
+       *
+       * @returns {Promise<Object|null>} { node, view, next, rec, siblings } или null
+       */
+    	this.resumeEntry = async function () {
+    		var rec = DLNA.resumeLoad();
+    		if (!rec) return null;
+
+    		var view = Lampa.Timeline.view(DLNA.fileHash(rec.node));
+    		var siblings = [];
+
+    		// соседи по папке: по ним плеер уходит к следующей серии, в них же ищем её сами
+    		var wait = rec.folder_id ? DLNA.browse(rec.folder_id).then(function (nodes) {
+    			siblings = orderEpisodes(nodes.filter(function (n) { return DLNA.isVideo(n) && n.url; }));
+    		}, function (e) {
+    			console.error('DLNA', 'resume', e);
+    		}) : null;
+
+    		var entry = { rec: rec, siblings: function () { return siblings; } };
+
+    		// недосмотренный файл известен сразу: строку показываем, не дожидаясь папки
+    		if (view.percent > 0 && view.percent < VIEWED_DONE) {
+    			entry.node = rec.node;
+    			entry.view = view;
+    			entry.next = false;
+    			return entry;
+    		}
+
+    		if (wait) await wait;
+    		if (destroyed) return null;
+
+    		var next = nextEpisode(siblings, rec.node);
+    		if (!next) return null;
+
+    		entry.node = next;
+    		entry.view = Lampa.Timeline.view(DLNA.fileHash(next));
+    		entry.next = true;
+    		return entry;
+    	};
+
+      /**
+       * Поставить строку "Продолжить" в начало списка
+       *
+       * Список к этому моменту уже показан, поэтому фокус переносим, только если
+       * человек его ещё не двигал - иначе строка уедет из-под руки.
+       */
+    	this.showResume = function (entry) {
+    		if (!entry || destroyed || empty_shown) return;
+
+    		resume = entry;
+
+    		var node = entry.node;
+    		var show = entry.rec.show;
+    		var poster = show ? TMDB.image(show.poster, 'w300') : '';
+    		var label = Lampa.Lang.translate(entry.next ? 'dlna_resume_next' : 'dlna_resume');
     		var descr = [
-    			node.childCount ? node.childCount + ' ' + Lampa.Lang.translate('dlna_browser_items') : '',
-    			DLNA.viewDate(node.title)
+    			'<span class="dlna-resume__label">' + label + '</span>',
+    			entry.next ? node.title : timeLeft(entry.view)
     		].filter(function (v) { return v; }).join(' / ');
+
+    		var item = Lampa.Template.get('dlna_thumb', {
+    			title: nodeTitle(node, show) || node.title,
+    			quality: descr,
+    			info: ''
+    		});
+    		item.addClass('dlna-resume');
+
+    		this.thumbBox(item, node, ICON_PLAY, false);
+    		// кадр серии есть только у той, что смотрели; у следующей берём постер сериала
+    		this.setThumb(item.find('.dlna-thumb'), entry.next ? poster : (entry.rec.still || poster));
+
+    		item.append(Lampa.Timeline.render(entry.view));
+    		markViewed(item, false, entry.view);
+
+    		var _this = this;
+    		item.on('hover:enter', function () { _this.playResume(entry); });
+    		longMenu(item, function () { return _this.reloadAction(); });
+
+    		// пока страница не открыта, коллекцию навигации трогать нельзя: она сейчас
+    		// чужая, а нашу соберёт start() при переходе на страницу
+    		var mine = Lampa.Activity.active().activity === this.activity;
+    		var active = mine && Lampa.Controller.enabled().name === 'content';
+    		var move = active && last === scroll.render().find('.selector')[0];
+
+    		this.prepend(item);
+
+    		if (active) {
+    			Lampa.Controller.collectionSet(scroll.render());
+    			if (move) Lampa.Controller.collectionFocus(item[0], scroll.render());
+    		}
+
+    		this.loadPreviews(); // ни сервер, ни запись могли не дать кадра - поищем постер
+    	};
+
+      /**
+       * Запустить строку "Продолжить"
+       */
+    	this.playResume = function (entry) {
+    		var rec = entry.rec;
+    		var node = entry.node;
+    		var show = rec.show;
+    		var siblings = entry.siblings();
+
+    		// плейлист собран по соседям файла; если самого файла там нет, идти дальше некуда
+    		var inside = siblings.some(function (n) { return DLNA.fileKey(n) === DLNA.fileKey(node); });
+    		var playlist = inside ? siblings.map(function (n) {
+    			return {
+    				title: nodeTitle(n, show),
+    				url: DLNA.getProxyURL(n.url),
+    				timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration)
+    			};
+    		}) : [];
+
+    		var first = {
+    			title: nodeTitle(node, show),
+    			url: DLNA.getProxyURL(node.url),
+    			timeline: DLNA.playerTimeline(entry.view, node.duration)
+    		};
+    		if (playlist.length > 1) first.playlist = playlist;
+
+    		Lampa.Player.play(first);
+    		Lampa.Player.playlist(playlist.length ? playlist : [first]);
+
+    		DLNA.markView(node.title, rec.folder_title, rec.root_title);
+    		DLNA.setViewed([DLNA.fileHash(node)], true);
+    		addHistory(show, node.title);
+
+    		DLNA.resumeSave({
+    			node: DLNA.packNode(node),
+    			folder_id: rec.folder_id,
+    			folder_title: rec.folder_title,
+    			root_title: rec.root_title,
+    			show: show || null,
+    			title: first.title,
+    			still: entry.next ? '' : rec.still // кадра следующей серии страница не знает
+    		});
+    	};
+
+    	this.appendFolder = function (node) {
+    		var seen = DLNA.folderSeen(node.title);
+    		var total = seen ? seen.t : parseInt(node.childCount) || 0;
+
+    		// "просмотрено 5 из 12" полезнее, чем "12 эл."; пока не смотрели - показываем счёт
+    		var count = seen && seen.s
+    			? Lampa.Lang.translate('dlna_folder_seen').replace('%s', seen.s).replace('%d', total)
+    			: (total ? total + ' ' + Lampa.Lang.translate('dlna_browser_items') : '');
+
+    		var descr = [count, DLNA.viewDate(node.title)].filter(function (v) { return v; }).join(' / ');
 
     		var item = Lampa.Template.get('dlna_thumb', {
     			title: node.title,
@@ -1987,6 +2625,9 @@
     			info: ''
     		});
     		this.thumbBox(item, node, ICON_FOLDER, true);
+
+    		var _this = this;
+    		longMenu(item, function () { return _this.reloadAction(); });
 
     		item.on('hover:enter', function () {
     			Lampa.Activity.push({
@@ -2052,14 +2693,16 @@
     			if (viewed.indexOf(hash) !== -1) item.append('<div class="torrent-item__viewed">' + Lampa.Template.get('icon_star', {}, true) + '</div>');
     		}
     		markViewed(item, viewed.indexOf(hash) !== -1, view);
+    		var _this = this;
+
     		viewedMenu(item, {
     			timeline: [hash, link ? link.t : ''],
     			viewed: [hash, link ? link.v : '']
     		}, function (is_viewed) {
     			paintViewed(item, is_viewed, view, !episode);
+    		}, function () {
+    			return _this.reloadAction();
     		});
-
-    		var _this = this;
 
     		item.on('hover:enter', function () {
     			if (!can_play) return Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_cantplay'));
@@ -2083,6 +2726,18 @@
 
     			// отметка времени просмотра: по ней сортируется главная страница
     			DLNA.markView(node.title, object.folder_title, object.root_title);
+    			addHistory(show, node.title);
+
+    			// с чего продолжить в следующий раз - главная страница откроется на этом файле
+    			DLNA.resumeSave({
+    				node: DLNA.packNode(node),
+    				folder_id: object.folder_id || '',
+    				folder_title: object.folder_title || '',
+    				root_title: object.root_title || '',
+    				show: show || TMDB.cached(node.title),
+    				title: _this.playerTitle(node),
+    				still: episode ? TMDB.image(episode.data.still, 'w300') : ''
+    			});
 
     			if (viewed.indexOf(hash) == -1) {
     				viewed.push(hash);
@@ -2092,6 +2747,8 @@
     			}
     			item.addClass(VIEWED_CLASS);
     			if (link) DLNA.syncViewed(hash, link.v);
+
+    			DLNA.countFolder(object.folder_title, playlist_source); // строка папки на главной покажет новый счёт
     		});
     		this.append(item);
     	};
@@ -2125,13 +2782,21 @@
        * Постеры папок, кадры и названия серий из TMDB - локальный сервер их не отдаёт
        */
     	this.loadPreviews = async function () {
+    		var _this = this;
     		var lookups = 0;
 
     		// строки, для которых нативный вид серии не подошёл: папки и несопоставленные файлы
-    		for (var i = 0; i < rows.length; i++) {
-    			var row = rows[i];
+    		var need = rows.filter(function (row) {
+    			return !row.done && !row.box.find('img').length; // превью уже дал сервер
+    		});
+    		if (!need.length) return;
+
+    		need.forEach(function (row) { row.done = true; });
+
+    		// поиск в TMDB - это сеть, а не домашний сервер: очередью по одному сотня
+    		// строк растягивалась на сотню запросов подряд, и нижние ждали минутами
+    		await pool(need, TMDB_PARALLEL, async function (row) {
     			if (destroyed) return;
-    			if (row.box.find('img').length) continue; // превью уже дал сервер
 
     			var src = '';
 
@@ -2139,29 +2804,63 @@
     			if (!row.folder && show && show.type === 'movie') src = TMDB.image(show.poster, 'w300');
 
     			if (!src) {
-    				if (lookups >= TMDB_MAX_LOOKUP) continue; // на пёстрой папке не устраиваем шквал поиска
-    				lookups++;
+    				// уже найденное берём даром: запросов стоят только новые имена
+    				var match = TMDB.cached(row.node.title);
 
-    				var match = await TMDB.match(row.node.title);
+    				if (!match && lookups < TMDB_MAX_LOOKUP) { // на пёстрой папке не устраиваем шквал поиска
+    					lookups++;
+    					match = await TMDB.match(row.node.title);
+    				}
     				if (destroyed) return;
     				if (match) src = TMDB.image(match.poster, 'w300');
     			}
 
-    			this.setThumb(row.box, src);
-    		}
+    			_this.setThumb(row.box, src);
+    		});
     	};
 
     	this.append = function (item) {
-    		item.on('hover:focus', function (e) {
-    			last = e.target;
-    			scroll.update($(e.target), true);
-    		});
+    		this.watch(item);
+    		appended = item[0];
     		scroll.append(item);
     	};
 
+      /**
+       * Строка по названию: после перерисовки та же строка стоит уже на другом месте
+       */
+    	this.rowByTitle = function (title) {
+    		var found = null;
+
+    		if (title) scroll.render().find('.selector').each(function () {
+    			if (!found && $(this).find('.online__title').text() === title) found = this;
+    		});
+
+    		return found;
+    	};
+
+    	this.prepend = function (item) {
+    		this.watch(item);
+    		scroll.body().prepend(item);
+    	};
+
+    	this.watch = function (item) {
+    		var _this = this;
+
+    		item.on('hover:focus', function (e) {
+    			last = e.target;
+    			scroll.update($(e.target), true);
+
+    			// дошли до конца отрисованного - готовим следующую порцию
+    			if (tail && e.target === tail) _this.more(PAGE_ROWS);
+    		});
+    	};
+
     	this.empty = function () {
+    		empty_shown = true;
+    		scroll.clear(); // строка "Продолжить" могла успеть встать раньше - играть с мёртвого сервера нечего
+
     		var empty = Lampa.Template.get('list_empty');
-    		empty.find('.empty__descr').text(Lampa.Lang.translate('dlna_browser_empty'));
+    		empty.find('.empty__descr').text(DLNA.errorText() || Lampa.Lang.translate('dlna_browser_empty'));
     		scroll.append(empty);
     		this.activity.loader(false);
     		resize();
@@ -2173,8 +2872,14 @@
     		if (Lampa.Activity.active().activity !== this.activity) return;
 
     		// внутри папки встаём туда, где остановились; на главной список и так
-    		// отсортирован по свежести просмотра, там нужен самый верх
-    		if (first_select && !last) last = (object.folder_id && resumeItem(scroll)) || scroll.render().find('.selector').eq(0)[0];
+    		// отсортирован по свежести просмотра, там нужен самый верх.
+    		// после обновления возвращаемся на ту строку, с которой его позвали
+    		if (first_select && !last) {
+    			last = (restore && this.rowByTitle(restore))
+    				|| (object.folder_id && resumeItem(scroll))
+    				|| scroll.render().find('.selector').eq(0)[0];
+    		}
+    		restore = '';
 
     		Lampa.Controller.add('content', {
     			toggle: function toggle() {
@@ -2209,6 +2914,7 @@
     	this.destroy = function () {
     		destroyed = true;
     		rows = [];
+    		pending = [];
     		thumb_queue = []; // недогруженные превью закрытой страницы уже не нужны
     		if (TMDB.net) TMDB.net.clear();
     		window.removeEventListener('resize', resize);
@@ -2270,6 +2976,13 @@
     		zh: 'DLNA 服务器',
     		bg: 'DLNA сървър'
     	},
+    	dlna_folder_seen: {
+    		ru: 'просмотрено %s из %d',
+    		uk: 'переглянуто %s з %d',
+    		en: '%s of %d watched',
+    		zh: '已看 %s / %d',
+    		bg: 'гледани %s от %d'
+    	},
     	dlna_browser_items: {
     		ru: 'эл.',
     		uk: 'ел.',
@@ -2298,12 +3011,61 @@
     		zh: '未找到文件夹，打开服务器根目录',
     		bg: 'Папката не е намерена, отворен е коренът на сървъра'
     	},
+    	dlna_err_noserver: {
+    		ru: 'Не задан адрес DLNA-сервера. Откройте Настройки - DLNA (локальная сеть)',
+    		uk: 'Не задано адресу DLNA-сервера. Відкрийте Налаштування - DLNA (локальна мережа)',
+    		en: 'DLNA server address is not set. Open Settings - DLNA (local network)',
+    		zh: '未设置 DLNA 服务器地址。请打开设置 - DLNA（局域网）',
+    		bg: 'Не е зададен адрес на DLNA сървъра. Отворете Настройки - DLNA (локална мрежа)'
+    	},
+    	dlna_err_unreachable: {
+    		ru: 'Сервер %s не отвечает. Проверьте адрес и что устройство в той же сети',
+    		uk: 'Сервер %s не відповідає. Перевірте адресу та що пристрій у тій самій мережі',
+    		en: 'Server %s is not responding. Check the address and that both are on the same network',
+    		zh: '服务器 %s 无响应。请检查地址以及设备是否在同一网络中',
+    		bg: 'Сървърът %s не отговаря. Проверете адреса и дали устройството е в същата мрежа'
+    	},
+    	dlna_err_nocontrol: {
+    		ru: 'Сервер %s отвечает, но список файлов не отдаёт. Возможно, нужен прокси',
+    		uk: 'Сервер %s відповідає, але список файлів не віддає. Можливо, потрібен проксі',
+    		en: 'Server %s responds but returns no file list. A proxy may be required',
+    		zh: '服务器 %s 有响应，但未返回文件列表。可能需要代理',
+    		bg: 'Сървърът %s отговаря, но не връща списък с файлове. Може да е нужно прокси'
+    	},
     	dlna_browser_cantplay: {
     		ru: 'Этот файл нельзя воспроизвести',
     		uk: 'Цей файл неможливо відтворити',
     		en: 'This file cannot be played',
     		zh: '无法播放此文件',
     		bg: 'Този файл не може да бъде възпроизведен'
+    	},
+    	dlna_resume: {
+    		ru: 'Продолжить',
+    		uk: 'Продовжити',
+    		en: 'Continue',
+    		zh: '继续观看',
+    		bg: 'Продължи'
+    	},
+    	dlna_resume_next: {
+    		ru: 'Следующая серия',
+    		uk: 'Наступна серія',
+    		en: 'Next episode',
+    		zh: '下一集',
+    		bg: 'Следващ епизод'
+    	},
+    	dlna_resume_left: {
+    		ru: 'осталось %s',
+    		uk: 'залишилось %s',
+    		en: '%s left',
+    		zh: '剩余 %s',
+    		bg: 'остават %s'
+    	},
+    	dlna_reload: {
+    		ru: 'Обновить список',
+    		uk: 'Оновити список',
+    		en: 'Refresh list',
+    		zh: '刷新列表',
+    		bg: 'Обнови списъка'
     	},
     	dlna_view_on: {
     		ru: 'Отметить просмотренным',
