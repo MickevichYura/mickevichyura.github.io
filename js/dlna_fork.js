@@ -1024,8 +1024,8 @@
 		this.cleanTitle = function (title) {
 			return title
           .replace(/\b(SDR|WEBDL|4K|2160p|480p|720p|1080p|x264|Blu-Ray|Remux|UHD|HDRip|WEBRip|WEB-DL|AVC|BDRip|Rus|Eng|Dub|AVO|Sub)\b/gi, '') // удаляем разрешения и форматы
-          .replace(/\.\d{4}\./g, '') // удаляем год
-          .replace(/\./g, '') // заменяем точки на пустоту
+          .replace(/\.\d{4}\./g, ' ') // год выкидываем, но слова вокруг него не склеиваем
+          .replace(/\./g, ' ') // точка в имени релиза - разделитель слов, а не мусор
           .trim(); // убираем пробелы с начала и конца строки
         }
 
@@ -1073,9 +1073,8 @@
 
         	similarities.sort(function (a, b) { return a.distance - b.distance; });
 
-        	// отсекаем заведомо чужое; если не осталось ничего - показываем три лучших
+        	// отсекаем заведомо чужое: пустой список честнее трёх случайных файлов
         	var relevant = similarities.filter(function (x) { return x.distance <= RELEVANCE_THRESHOLD; });
-        	if (!relevant.length) relevant = similarities.slice(0, 3);
 
         	return relevant.slice(0, MAX_RESULTS).map(function (x) { return x.item; });
         }
@@ -1148,6 +1147,9 @@
 				if (!videoItems.length && DLNA.errorText()) return component.empty(DLNA.errorText());
 
 				const videoItemsBest3 = this.findSimilarTitles(search_zero, search_one, search_two, videoItems);
+
+				// ничего похожего: так понятнее, чем пустой экран с одной панелью фильтра
+				if (!videoItemsBest3.length) return component.emptyForQuery(search_zero || search_one || search_two);
 
 				results = {'player_links': {"movie": []}};
 
