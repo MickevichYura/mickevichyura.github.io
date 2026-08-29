@@ -617,6 +617,29 @@
 			return isNaN(sec) ? 0 : sec;
 		},
 
+		/**
+		 * Таймлайн для плеера с уже известной длительностью
+		 *
+		 * У больших MKV таблица перемотки (Cues) лежит в конце файла: пока плеер
+		 * не дотянет хвост, он не знает duration и не может встать на сохранённое
+		 * время - первые секунды идут с нуля, а потом происходит скачок. Сервер
+		 * отдаёт длительность в DIDL сразу, ей и заполняем пустое поле.
+		 *
+		 * Возвращаем копию: этот же view отрисован в списке, а там своя разметка
+		 * прогресса, и лишняя длительность у непросмотренного файла ей ни к чему.
+		 * Хеш копия сохраняет, поэтому прогресс из плеера ляжет туда же, куда и без неё.
+		 */
+		playerTimeline: function (view, didl_duration) {
+			var seconds = DLNA.durationSeconds(didl_duration);
+			if (!seconds || !view || view.duration) return view;
+
+			var copy = {};
+			for (var key in view) copy[key] = view[key];
+			copy.duration = seconds;
+
+			return copy;
+		},
+
 		humanSize: function (bytes) {
 			var size = parseInt(bytes);
 			if (!size || isNaN(size)) return '';
@@ -1261,7 +1284,7 @@
       				var first = {
       					url: extra.file,
                 // quality: extra.quality,
-      					timeline: view,
+      					timeline: DLNA.playerTimeline(view, element.duration),
       					title: playerTitle(element)
       				};
 
@@ -1272,7 +1295,7 @@
       							title: playerTitle(elem),
       							url: ex.file,
                     // quality: ex.quality,
-      							timeline: elem.timeline
+      							timeline: DLNA.playerTimeline(elem.timeline, elem.duration)
       						});
       					});
       				} else {
@@ -2045,13 +2068,13 @@
     				return {
     					title: _this.playerTitle(n),
     					url: DLNA.getProxyURL(n.url),
-    					timeline: Lampa.Timeline.view(DLNA.fileHash(n))
+    					timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration)
     				};
     			});
     			var first = {
     				title: _this.playerTitle(node),
     				url: url,
-    				timeline: view
+    				timeline: DLNA.playerTimeline(view, node.duration)
     			};
     			if (playlist.length > 1) first.playlist = playlist;
 
