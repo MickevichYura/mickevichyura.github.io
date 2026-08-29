@@ -1622,6 +1622,7 @@
      */
     function viewedMenu(item, keys, paint, extra) {
     	item.on('hover:long', function () {
+    		var enabled = Lampa.Controller.enabled().name; // куда вернуться, закрыв меню
     		var is_viewed = DLNA.isViewed(keys.viewed);
     		var view = Lampa.Timeline.view(keys.timeline[0]);
 
@@ -1638,15 +1639,15 @@
     		if (extra) menu = menu.concat(extra());
 
     		Lampa.Select.show({
-    			title: Lampa.Lang.translate('dlna_view_action'),
+    			title: Lampa.Lang.translate('title_action'),
     			items: menu,
     			onBack: function () {
-    				Lampa.Controller.toggle('content');
+    				Lampa.Controller.toggle(enabled);
     			},
     			onSelect: function (action) {
     				action.run();
     				paint(DLNA.isViewed(keys.viewed));
-    				Lampa.Controller.toggle('content');
+    				Lampa.Controller.toggle(enabled);
     			}
     		});
     	});
@@ -2280,13 +2281,6 @@
     		en: 'This file cannot be played',
     		zh: '无法播放此文件',
     		bg: 'Този файл не може да бъде възпроизведен'
-    	},
-    	dlna_view_action: {
-    		ru: 'Отметка просмотра',
-    		uk: 'Позначка перегляду',
-    		en: 'Watched mark',
-    		zh: '观看标记',
-    		bg: 'Отметка за гледане'
     	},
     	dlna_view_on: {
     		ru: 'Отметить просмотренным',
