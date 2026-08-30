@@ -18,7 +18,9 @@
 
 	.stage { position: relative; flex: 1; width: 100%; display: flex; justify-content: center;
 		align-items: center; min-height: 0; }
-	svg { width: min(92vw, 100%, 62vh); height: 100%; max-height: 62vh; overflow: visible; }
+	/* В вопросе кадр широкий и невысокий, поэтому колесо тянем по высоте: по ширине места
+	   всё равно больше, чем нужно. */
+	svg { width: min(92vw, 100%, 70vh); height: 100%; max-height: 70vh; overflow: visible; }
 	/* Стрелка нарисована поверх колеса, а не внутри него: она не должна крутиться. */
 	.pin { position: absolute; top: 0; left: 50%; transform: translate(-50%, -30%);
 		width: 0; height: 0; border-left: 2.2vh solid transparent; border-right: 2.2vh solid transparent;
@@ -69,7 +71,11 @@
 	<svg id="wheel" viewBox="-100 -100 200 200"><g id="rotor"></g></svg>
 </div>
 
-<div class="result" id="result"></div>
+<!-- Тот же контракт, что у секундомера и банка: расширение ведущего читает выпавшее из
+     `.value#v`, поэтому внутри только надпись сектора - ни подписи, ни знака. Пока колесо
+     летит, элемент пуст: расширение опрашивает страницу пять раз в секунду, и покажи она
+     результат раньше, ведущий успел бы начислить то, что ещё крутится. -->
+<div class="result value" id="v"></div>
 <button class="spin" id="spin" disabled>Крутить</button>
 
 <div class="foot">
@@ -117,8 +123,15 @@
 	// Адрес веб-приложения Apps Script - тот же, что принимает отчёты миниигр. В коде его нет:
 	// страница лежит в публичном репозитории, а ссылку ведущий раздаёт сам, параметром.
 	var URL_KEY = 'si:report';
-	var REPORT = query('url') || stored(URL_KEY);
+	var REPORT = fill('{{REPORT}}') || query('url') || stored(URL_KEY);
 	if (query('url')) keep(URL_KEY, REPORT);
+
+	// Колесо этого вопроса и его метка. Их подставляет сборщик пакета - внутри .siq параметры
+	// к странице не передать. Не подставлены (страница открыта отдельной вкладкой) - сектора
+	// задаёт ведущий в панели, как раньше.
+	var QUESTION = fill('{{QUESTION}}');
+	var SECTORS = fill('{{SECTORS}}');
+	SECTORS = SECTORS ? SECTORS.split('|') : [];
 
 	// Столько летит колесо. Значение общее с report.gs: сервер называет только момент старта,
 	// а длину полёта обе стороны знают наизусть.
@@ -128,7 +141,7 @@
 
 	var status = document.getElementById('status');
 	var rotor = document.getElementById('rotor');
-	var result = document.getElementById('result');
+	var result = document.getElementById('v');
 	var spinButton = document.getElementById('spin');
 	var meText = document.getElementById('me');
 
@@ -139,6 +152,9 @@
 	var shownSpin = '';   // какой спин уже показан в итоге: чтобы не мигать им каждый кадр
 	var offset = 0;       // поправка к часам клиента, чтобы считать время сервера
 	var bestTrip = 1e9;   // по какому замеру она взята: чем короче ходил запрос, тем он точнее
+
+	// Незаполненный сборщиком placeholder остаётся текстом - значит, значения нет.
+	function fill(value) { return value.indexOf('{{') === 0 ? '' : value; }
 
 	function query(name) {
 		var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
@@ -339,10 +355,16 @@
 	}
 
 	function apply(d) {
-		state.sectors = d.sectors || [];
-		state.turn = d.turn || '';
-		state.angle = Number(d.angle) || 0;
-		state.spin = d.spin || null;
+		// Пока сервер не подтвердил, что на столе колесо этого вопроса, чужого состояния не
+		// показываем: объявление вопроса и первый опрос идут наперегонки, и в эту секунду там
+		// ещё висит спин прошлого вопроса - а расширение читает страницу пять раз в секунду.
+		// Сектора при этом рисуем свои: колесо видно сразу, а не через полсекунды.
+		var mine = !QUESTION || d.question === QUESTION;
+
+		state.sectors = mine ? (d.sectors || []) : SECTORS;
+		state.turn = mine ? (d.turn || '') : '';
+		state.angle = mine ? (Number(d.angle) || 0) : 0;
+		state.spin = mine ? (d.spin || null) : null;
 
 		var key = state.sectors.join('\n');
 		if (key !== drawnFor) {
@@ -353,7 +375,12 @@
 
 		// Итог держим на экране, только пока он от текущего спина: новый спин стирает его
 		// сразу, иначе прошлый сектор висит поверх летящего колеса.
-		if (!state.spin || shownSpin !== state.spin.id) result.classList.remove('on');
+		// Текст чистим вместе с подсветкой: спрятанную прозрачностью надпись расширение
+		// всё равно прочитает, и на новом вопросе начислит прошлое число.
+		if (!state.spin || shownSpin !== state.spin.id) {
+			result.classList.remove('on');
+			result.textContent = '';
+		}
 
 		say();
 		showTurns();
@@ -387,6 +414,15 @@
 	}
 
 	document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+
+	// Вопрос открылся - его колесо и объявляем. Пока вопрос тот же, сервер объявление молча
+	// пропустит: страницу переоткрывают, а спин посреди вопроса терять нельзя. Шлют его все
+	// экраны разом, и это не беда - оно идемпотентно.
+	function announce() {
+		if (!QUESTION || !REPORT) return;
+
+		send({ action: 'question', id: QUESTION, sectors: SECTORS });
+	}
 
 	// -- Игрок ----------------------------------------------------------------
 
@@ -426,6 +462,21 @@
 	}
 
 	function isShowman() { return alike(me, 'ведущий'); }
+
+	// Клиент игры и контент-сервис - разные origin, и флаг, который расширение положило
+	// в хранилище страницы игры, отсюда не виден. Поэтому спрашиваем окно игры сообщением:
+	// расширение живёт и там. Ответа нет (не поставлено, страница открыта вкладкой) - всё
+	// как было, ведущий назовётся кнопкой.
+	function askShowman() {
+		try { parent.postMessage({ source: 'si-timer-score:who' }, '*'); } catch (e) {}
+	}
+
+	addEventListener('message', function (e) {
+		var d = e.data;
+		if (!d || d.source !== 'si-timer-score:showman' || !d.value || isShowman()) return;
+
+		remember('ведущий', myTable);
+	});
 
 	function askWho() {
 		askName.value = me;
@@ -643,6 +694,7 @@
 		setup.classList.remove('on');
 
 		loadRoster();
+		announce();
 		poll();
 		if (!me) askWho();
 	}
@@ -661,6 +713,8 @@
 	meText.textContent = me || 'кто я?';
 	document.getElementById('openPanel').hidden = !isShowman();
 
+	askShowman();
+	announce();
 	loadRoster();
 	setInterval(loadRoster, 30000);  // состав приезжает не сразу: ведущий открывает игру позже
 	beat();
