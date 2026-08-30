@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Колесо</title>
+<style>
+	:root { color-scheme: dark; }
+	html, body { margin: 0; height: 100%; background: #0a1022; color: #fff; overflow: hidden;
+		font-family: 'Segoe UI', system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
+	body { display: flex; flex-direction: column; align-items: center; gap: 1.5vh;
+		padding: 2vh 4vw calc(2vh + env(safe-area-inset-bottom)); box-sizing: border-box; }
+
+	/* Строка состояния: чей ход и что вообще происходит. Игрок смотрит сюда, чтобы понять,
+	   ждать ему или жать. */
+	.status { font-size: clamp(15px, 2.6vh, 26px); opacity: .75; text-align: center; min-height: 1.4em; }
+	.status b { color: #ffe082; opacity: 1; }
+
+	.stage { position: relative; flex: 1; width: 100%; display: flex; justify-content: center;
+		align-items: center; min-height: 0; }
+	svg { width: min(92vw, 100%, 62vh); height: 100%; max-height: 62vh; overflow: visible; }
+	/* Стрелка нарисована поверх колеса, а не внутри него: она не должна крутиться. */
+	.pin { position: absolute; top: 0; left: 50%; transform: translate(-50%, -30%);
+		width: 0; height: 0; border-left: 2.2vh solid transparent; border-right: 2.2vh solid transparent;
+		border-top: 4vh solid #ffe082; filter: drop-shadow(0 .4vh .8vh rgba(0,0,0,.6)); z-index: 2; }
+	.sector-text { font-weight: 700; fill: #fff; paint-order: stroke;
+		stroke: rgba(0,0,0,.35); stroke-width: .6; }
+
+	/* Итог крупно под колесом: в самом колесе выигравший сектор читается, но мелко,
+	   а результат нужен через полкомнаты. */
+	.result { font-size: clamp(20px, 4.6vh, 46px); font-weight: 800; color: #ffe082; text-align: center;
+		min-height: 1.2em; line-height: 1.15; opacity: 0; transition: opacity .25s; }
+	.result.on { opacity: 1; }
+
+	button { font: inherit; color: #fff; background: #1b2440; border: 1px solid #2f3d68;
+		border-radius: .8em; padding: .5em .9em; cursor: pointer; }
+	button:hover:not(:disabled) { background: #263257; }
+	button:disabled { opacity: .35; cursor: default; }
+
+	.spin { font-size: clamp(18px, 3.4vh, 32px); font-weight: 700; padding: .55em 2em;
+		background: #2b7a4b; border-color: #3da76a; }
+	.spin:hover:not(:disabled) { background: #35935a; }
+
+	/* Служебная строка: кто я и (у ведущего) вход в панель. Мелкая, внизу, не мешает. */
+	.foot { display: flex; gap: 1em; align-items: center; font-size: clamp(12px, 1.9vh, 18px); opacity: .6; }
+	.foot span { cursor: pointer; text-decoration: underline dotted; }
+
+	/* Оверлеи: выбор имени и панель ведущего. Тот же приём, что в минииграх пакета. */
+	.sheet { position: fixed; inset: 0; background: rgba(6, 10, 22, .94); display: none;
+		flex-direction: column; gap: 1.4vh; padding: 4vh 5vw; overflow: auto; z-index: 5; }
+	.sheet.on { display: flex; }
+	.sheet h2 { margin: 0; font-size: clamp(17px, 3vh, 28px); font-weight: 600; }
+	.sheet .row { display: flex; flex-wrap: wrap; gap: .6em; }
+	.sheet input, .sheet textarea { font: inherit; color: #fff; background: #131b33;
+		border: 1px solid #2f3d68; border-radius: .6em; padding: .5em .7em; width: 100%;
+		box-sizing: border-box; }
+	.sheet textarea { min-height: 26vh; resize: vertical; line-height: 1.5; }
+	.sheet .hint { font-size: .82em; opacity: .5; line-height: 1.4; }
+	.tableName { font-size: .82em; opacity: .5; width: 100%; margin-top: .4em; }
+	.turn-on { background: #2b7a4b; border-color: #3da76a; }
+</style>
+</head>
+<body>
+
+<div class="status" id="status"></div>
+
+<div class="stage">
+	<div class="pin"></div>
+	<svg id="wheel" viewBox="-100 -100 200 200"><g id="rotor"></g></svg>
+</div>
+
+<div class="result" id="result"></div>
+<button class="spin" id="spin" disabled>Крутить</button>
+
+<div class="foot">
+	<span id="me">кто я?</span>
+	<span id="openPanel" hidden>панель ведущего</span>
+</div>
+
+<!-- Кто играет: тот же вопрос и тот же ключ хранилища, что в минииграх пакета,
+     поэтому представившийся там на колесе уже узнан. -->
+<div class="sheet" id="ask">
+	<h2>Кто вы?</h2>
+	<div class="row" id="askList"></div>
+	<div class="row"><input id="askName" placeholder="или впишите имя"></div>
+	<div class="row"><button id="askOk">Готово</button></div>
+</div>
+
+<!-- Ссылку с ?url= раздаёт ведущий, но открыть страницу могут и без неё - с закладки,
+     из истории, с чужого устройства. Без этого окна это тупик: вписать адрес некуда. -->
+<div class="sheet" id="setup">
+	<h2>Адрес таблицы</h2>
+	<div class="hint">Веб-приложение Apps Script, которое принимает отчёты миниигр.
+		Обычно он приходит в ссылке от ведущего.</div>
+	<div class="row"><input id="setupUrl" placeholder="https://script.google.com/macros/s/…/exec"></div>
+	<div class="row"><button id="setupOk">Подключить</button></div>
+</div>
+
+<div class="sheet" id="panel">
+	<h2>Панель ведущего</h2>
+
+	<div>Сектора — по одному в строке:</div>
+	<textarea id="sectors" spellcheck="false"></textarea>
+	<div class="row"><button id="saveSectors">Сохранить сектора</button></div>
+
+	<div>Кому открыт ход:</div>
+	<div class="row" id="turnList"></div>
+
+	<div class="row"><button id="copyLink">Скопировать ссылку для игроков</button></div>
+	<div class="hint" id="linkHint"></div>
+
+	<div class="row"><button id="closePanel">Закрыть</button></div>
+</div>
+
+<script>
+(function () {
+	// Адрес веб-приложения Apps Script - тот же, что принимает отчёты миниигр. В коде его нет:
+	// страница лежит в публичном репозитории, а ссылку ведущий раздаёт сам, параметром.
+	var URL_KEY = 'si:report';
+	var REPORT = query('url') || stored(URL_KEY);
+	if (query('url')) keep(URL_KEY, REPORT);
+
+	// Столько летит колесо. Значение общее с report.gs: сервер называет только момент старта,
+	// а длину полёта обе стороны знают наизусть.
+	var SPIN_MS = 8000;
+
+	var PALETTE = ['#c2410c', '#1d4ed8', '#15803d', '#a21caf', '#b45309', '#0f766e', '#be123c', '#4338ca'];
+
+	var status = document.getElementById('status');
+	var rotor = document.getElementById('rotor');
+	var result = document.getElementById('result');
+	var spinButton = document.getElementById('spin');
+	var meText = document.getElementById('me');
+
+	// Состояние колеса приезжает целиком с сервера и целиком же перерисовывается:
+	// у всех экранов одна картинка, спорить о ней некому.
+	var state = { sectors: [], turn: '', angle: 0, spin: null };
+	var drawnFor = '';    // по какому набору секторов нарисовано колесо
+	var shownSpin = '';   // какой спин уже показан в итоге: чтобы не мигать им каждый кадр
+	var offset = 0;       // поправка к часам клиента, чтобы считать время сервера
+	var bestTrip = 1e9;   // по какому замеру она взята: чем короче ходил запрос, тем он точнее
+
+	function query(name) {
+		var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+		return m ? decodeURIComponent(m[1]) : '';
+	}
+
+	function stored(key) {
+		try { return localStorage.getItem(key) || ''; } catch (e) { return ''; }
+	}
+
+	function keep(key, value) {
+		try { localStorage.setItem(key, value); } catch (e) {}
+	}
+
+	function alike(a, b) {
+		return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+	}
+
+	// Время сервера глазами этого клиента. Часы у игроков разъезжаются на секунды, а колесо
+	// должно останавливаться у всех разом - поэтому считаем всё по серверным.
+	function now() { return Date.now() + offset; }
+
+	// -- Колесо ---------------------------------------------------------------
+
+	// Сектор i занимает дугу от i*step до (i+1)*step, отсчёт по часовой от стрелки наверху.
+	// Поворот колеса на R переводит дугу a в a+R, значит под стрелкой оказывается a = -R.
+	// На этом равенстве держится и выбор угла на сервере, и подпись итога здесь.
+	function draw(sectors) {
+		var n = sectors.length;
+		rotor.innerHTML = '';
+		if (!n) return;
+
+		var step = 360 / n;
+		var R = 92;
+
+		sectors.forEach(function (label, i) {
+			var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			path.setAttribute('d', slice(i * step, (i + 1) * step, R));
+			path.setAttribute('fill', PALETTE[i % PALETTE.length]);
+			path.setAttribute('stroke', 'rgba(0,0,0,.35)');
+			path.setAttribute('stroke-width', '.7');
+			rotor.appendChild(path);
+
+			rotor.appendChild(caption(label, i * step + step / 2, step, R));
+		});
+
+		var hub = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+		hub.setAttribute('r', '9');
+		hub.setAttribute('fill', '#0a1022');
+		hub.setAttribute('stroke', '#ffe082');
+		hub.setAttribute('stroke-width', '2');
+		rotor.appendChild(hub);
+	}
+
+	function point(a, r) {
+		var rad = (a - 90) * Math.PI / 180;
+		return [r * Math.cos(rad), r * Math.sin(rad)];
+	}
+
+	function slice(from, to, r) {
+		var a = point(from, r), b = point(to, r);
+		var big = to - from > 180 ? 1 : 0;
+
+		return 'M0 0 L' + a[0].toFixed(2) + ' ' + a[1].toFixed(2) +
+			' A' + r + ' ' + r + ' 0 ' + big + ' 1 ' + b[0].toFixed(2) + ' ' + b[1].toFixed(2) + ' Z';
+	}
+
+	// Подпись едет вместе с сектором. Пока секторов немного, она стоит поперёк радиуса:
+	// тогда выигравшую надпись - а она всегда наверху, под стрелкой, - читают не наклоняя
+	// головы. На узком секторе так нельзя, длинное слово вылезает на соседей, и подпись
+	// разворачивается вдоль радиуса: места там ровно столько, сколько нужно.
+	function caption(label, center, step, r) {
+		var g = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+		g.setAttribute('class', 'sector-text');
+
+		if (step >= 40) {
+			across(g, String(label), step, r);
+		} else {
+			along(g, String(label), step, r);
+		}
+
+		g.setAttribute('transform', 'rotate(' + center.toFixed(2) + ') translate(0 ' +
+			(step >= 40 ? -r * 0.62 : -r * 0.90) + ')' + (step >= 40 ? '' : ' rotate(90)'));
+
+		return g;
+	}
+
+	function across(g, label, step, r) {
+		var lines = wrap(label, 10);
+
+		// Ширина сектора на том радиусе, где стоит подпись: по ней и подбираем шрифт.
+		// Раньше тут было деление на длину слова, и «Переход хода» уезжало в нечитаемые
+		// два пикселя, хотя место в секторе было.
+		var room = 2 * r * 0.62 * Math.sin(step * Math.PI / 360) * 1.25;
+		var size = Math.min(9, step * 0.5, room / (0.58 * longest(lines)));
+
+		g.setAttribute('text-anchor', 'middle');
+		g.setAttribute('font-size', size.toFixed(2));
+
+		lines.forEach(function (line, i) {
+			var tspan = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+			tspan.setAttribute('x', '0');
+			tspan.setAttribute('dy', i ? size * 1.15 : (1 - lines.length) * size * 0.55);
+			tspan.textContent = line;
+			g.appendChild(tspan);
+		});
+	}
+
+	// Вдоль радиуса подпись идёт от обода к центру и в одну строку: переносить её незачем,
+	// длина ограничена не шириной сектора, а радиусом.
+	function along(g, label, step, r) {
+		var size = Math.min(8, step * 0.8, r * 0.72 / (0.58 * Math.max(3, label.length)));
+
+		g.setAttribute('text-anchor', 'start');
+		g.setAttribute('dominant-baseline', 'middle');
+		g.setAttribute('font-size', size.toFixed(2));
+		g.textContent = label;
+	}
+
+	// Длинную подпись рвём по словам на две строки: обрезать нельзя - сектор с обрезанным
+	// текстом игроку ничего не говорит.
+	function wrap(text, limit) {
+		if (text.length <= limit) return [text];
+
+		var first = '', second = '';
+
+		text.split(' ').forEach(function (word) {
+			if (!second && (!first || first.length + word.length + 1 <= limit)) {
+				first += (first ? ' ' : '') + word;
+			} else {
+				second += (second ? ' ' : '') + word;
+			}
+		});
+
+		return second ? [first, second] : [first];
+	}
+
+	function longest(lines) {
+		return lines.reduce(function (max, line) { return Math.max(max, line.length); }, 0);
+	}
+
+	// Замедление к концу: без него колесо встаёт как вкопанное и результат выглядит
+	// подстроенным, хотя выпал он честно.
+	function ease(t) { return 1 - Math.pow(1 - t, 4); }
+
+	function angleNow() {
+		var s = state.spin;
+		if (!s) return state.angle;
+
+		var t = (now() - s.at) / SPIN_MS;
+		if (t <= 0) return s.from;       // часы клиента убежали вперёд - стоим на месте
+		if (t >= 1) return s.to;
+
+		return s.from + (s.to - s.from) * ease(t);
+	}
+
+	function frame() {
+		rotor.setAttribute('transform', 'rotate(' + angleNow().toFixed(2) + ')');
+
+		var s = state.spin;
+
+		if (s && now() - s.at >= SPIN_MS && shownSpin !== s.id) {
+			shownSpin = s.id;
+			result.textContent = state.sectors[s.index] || '';
+			result.classList.add('on');
+			say();
+		}
+
+		requestAnimationFrame(frame);
+	}
+
+	// -- Обмен с сервером -----------------------------------------------------
+
+	function endpoint(params) {
+		return REPORT + (REPORT.indexOf('?') < 0 ? '?' : '&') + params;
+	}
+
+	function poll() {
+		if (!REPORT || document.hidden) return;
+
+		var sent = Date.now();
+
+		fetch(endpoint('wheel=1&table=' + encodeURIComponent(myTable)))
+			.then(function (r) { return r.json(); })
+			.then(function (d) {
+				var trip = Date.now() - sent;
+
+				// Из нескольких замеров верим самому быстрому: в нём меньше всего неизвестно,
+				// сколько ответ пролежал в пути. Тот же приём, что у ntp.
+				if (trip < bestTrip) {
+					bestTrip = trip;
+					offset = d.now + trip / 2 - Date.now();
+				}
+
+				apply(d);
+			})
+			.catch(function () {});
+	}
+
+	function apply(d) {
+		state.sectors = d.sectors || [];
+		state.turn = d.turn || '';
+		state.angle = Number(d.angle) || 0;
+		state.spin = d.spin || null;
+
+		var key = state.sectors.join('\n');
+		if (key !== drawnFor) {
+			drawnFor = key;
+			draw(state.sectors);
+			if (!isPanelOpen()) sectorsBox.value = key;
+		}
+
+		// Итог держим на экране, только пока он от текущего спина: новый спин стирает его
+		// сразу, иначе прошлый сектор висит поверх летящего колеса.
+		if (!state.spin || shownSpin !== state.spin.id) result.classList.remove('on');
+
+		say();
+		showTurns();
+	}
+
+	function send(wheel) {
+		if (!REPORT) return;
+
+		// Ответ не читаем: POST в Apps Script уезжает через редирект, и no-cors - единственный
+		// способ, проверенный в минииграх. Что получилось, узнаем ближайшим опросом.
+		fetch(REPORT, {
+			method: 'POST',
+			mode: 'no-cors',
+			headers: { 'Content-Type': 'text/plain;charset=utf-8' },  // иначе браузер пойдёт с preflight
+			body: JSON.stringify({ wheel: wheel, table: myTable })
+		}).catch(function () {});
+
+		setTimeout(poll, 400);
+	}
+
+	// Пока идёт спин или у кого-то открыт ход, спрашиваем чаще: в эти секунды на экране
+	// что-то меняется. В остальное время реже - опрашивают все игроки разом, и каждый
+	// запрос стоит запуска скрипта.
+	function beat() {
+		poll();
+		setTimeout(beat, busy() ? 1000 : 4000);
+	}
+
+	function busy() {
+		return !!state.turn || (state.spin && now() - state.spin.at < SPIN_MS + 1500);
+	}
+
+	document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+
+	// -- Игрок ----------------------------------------------------------------
+
+	// Ключ общий со всеми минииграми пакета: кто представился там, здесь уже узнан.
+	var KEY = 'si:player';
+	var NAME_MS = 30 * 24 * 60 * 60 * 1000;
+
+	var me = '', myTable = '';
+	var ask = document.getElementById('ask');
+	var askName = document.getElementById('askName');
+	var askList = document.getElementById('askList');
+
+	function remembered() {
+		try {
+			var s = JSON.parse(localStorage.getItem(KEY) || 'null');
+			if (!s || !s.name || Date.now() - s.ts >= NAME_MS) return null;
+
+			myTable = s.table || '';
+			return s.name;
+		} catch (e) { return null; }
+	}
+
+	function remember(name, table) {
+		me = name;
+		if (table !== undefined) myTable = table;
+
+		try {
+			localStorage.setItem(KEY, JSON.stringify({ name: name, ts: Date.now(), table: myTable }));
+		} catch (e) {}
+
+		meText.textContent = name || 'кто я?';
+		document.getElementById('openPanel').hidden = !isShowman();
+		ask.classList.remove('on');
+
+		poll();
+		say();
+	}
+
+	function isShowman() { return alike(me, 'ведущий'); }
+
+	function askWho() {
+		askName.value = me;
+		ask.classList.add('on');
+	}
+
+	// Состав за столом кладёт на сервер расширение ведущего. Не приехал - имя вписывают руками.
+	var tables = [];
+
+	function loadRoster() {
+		if (!REPORT) return;
+
+		fetch(endpoint('roster=1'))
+			.then(function (r) { return r.json(); })
+			.then(function (d) {
+				tables = d.tables || [{ table: '', names: d.roster || [] }];
+				keepTable();
+				showRoster();
+				showTurns();
+			})
+			.catch(function () {});
+	}
+
+	// За каким столом мы записаны, тот и наш: имя помнится неделями, а ведущий за это время
+	// мог смениться. Ведущему стол искать не по чему - берём единственный живой, а если их
+	// несколько, он ткнёт нужный в панели.
+	function keepTable() {
+		if (isShowman()) {
+			if (!myTable && tables.length === 1) remember(me, tables[0].table);
+			return;
+		}
+
+		if (!me) return;
+
+		var mine = tables.filter(function (t) {
+			return (t.names || []).some(function (n) { return alike(n, me); });
+		});
+
+		if (mine.length === 1 && myTable !== mine[0].table) remember(me, mine[0].table);
+	}
+
+	function showRoster() {
+		askList.innerHTML = '';
+
+		tables.forEach(function (t) {
+			if (tables.length > 1) {
+				var head = document.createElement('div');
+				head.className = 'tableName';
+				head.textContent = tableName(t);
+				askList.appendChild(head);
+			}
+
+			(t.names || []).forEach(function (name) {
+				var b = document.createElement('button');
+				b.textContent = name;
+				b.onclick = function () { remember(name, t.table); };
+				askList.appendChild(b);
+			});
+		});
+
+		var mc = document.createElement('button');
+		mc.textContent = 'Ведущий';
+		mc.onclick = function () { remember('ведущий', tables.length === 1 ? tables[0].table : undefined); };
+		askList.appendChild(mc);
+	}
+
+	function tableName(t) {
+		if (t.showman) return t.showman;
+
+		var names = t.names || [];
+		return 'стол: ' + names.slice(0, 3).join(', ') + (names.length > 3 ? '…' : '');
+	}
+
+	function nameEntered() {
+		var name = askName.value.trim();
+		if (name) remember(name); else askName.focus();
+	}
+
+	document.getElementById('askOk').addEventListener('click', nameEntered);
+	askName.addEventListener('keydown', function (e) { if (e.key === 'Enter') nameEntered(); });
+	meText.addEventListener('click', askWho);
+
+	// -- Ход ------------------------------------------------------------------
+
+	function maySpin() {
+		if (!state.sectors.length) return false;
+		if (state.spin && now() - state.spin.at < SPIN_MS) return false;  // колесо ещё летит
+
+		return isShowman() || (!!state.turn && alike(me, state.turn));
+	}
+
+	function say() {
+		spinButton.disabled = !maySpin();
+
+		if (!REPORT) return void (status.textContent = 'Нет адреса таблицы - нажмите, чтобы вставить');
+		if (!me) return void (status.textContent = 'Представьтесь - внизу «кто я?»');
+		if (!state.sectors.length) return void (status.textContent = 'Ведущий ещё не задал сектора');
+
+		if (state.spin && now() - state.spin.at < SPIN_MS) {
+			status.innerHTML = 'Крутит <b>' + escaped(state.spin.by || '?') + '</b>…';
+			return;
+		}
+
+		if (!state.turn) {
+			status.textContent = isShowman() ? 'Откройте ход игроку в панели' : 'Ждём ведущего';
+			return;
+		}
+
+		// Имя ставим через двоеточие: склонять его в JS - верный способ получить «Ход у Пётр».
+		status.innerHTML = alike(me, state.turn) ? 'Ваш ход' : 'Ход: <b>' + escaped(state.turn) + '</b>';
+	}
+
+	// Имена приезжают из чужого клиента игры, а мы ставим их в разметку строкой.
+	function escaped(text) {
+		return String(text).replace(/[&<>]/g, function (c) {
+			return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+		});
+	}
+
+	spinButton.addEventListener('click', function () {
+		if (!maySpin()) return;
+
+		spinButton.disabled = true;
+		send({ action: 'spin', by: me });
+	});
+
+	// -- Панель ведущего ------------------------------------------------------
+
+	var panel = document.getElementById('panel');
+	var sectorsBox = document.getElementById('sectors');
+	var turnList = document.getElementById('turnList');
+
+	function isPanelOpen() { return panel.classList.contains('on'); }
+
+	document.getElementById('openPanel').addEventListener('click', function () {
+		sectorsBox.value = state.sectors.join('\n');
+		panel.classList.add('on');
+		showTurns();
+	});
+
+	document.getElementById('closePanel').addEventListener('click', function () {
+		panel.classList.remove('on');
+	});
+
+	document.getElementById('saveSectors').addEventListener('click', function () {
+		var list = sectorsBox.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+
+		send({ action: 'sectors', sectors: list });
+		panel.classList.remove('on');
+	});
+
+	// Кнопки состава: нажатая открывает ход, повторное нажатие закрывает. Кому открыто,
+	// ведущий видит по подсветке - отдельной строчки состояния тут мало.
+	function showTurns() {
+		if (!isPanelOpen()) return;
+
+		turnList.innerHTML = '';
+
+		var names = [];
+		var mine = tables.filter(function (t) { return t.table === myTable; });
+
+		(mine.length ? mine : tables).forEach(function (t) {
+			(t.names || []).forEach(function (name) {
+				if (names.indexOf(name) < 0) names.push(name);
+			});
+		});
+
+		if (!names.length) {
+			turnList.innerHTML = '<div class="hint">Состав не приехал: его кладёт на сервер ' +
+				'расширение ведущего. Пока его нет, крутить может только ведущий.</div>';
+			return;
+		}
+
+		names.forEach(function (name) {
+			var b = document.createElement('button');
+			b.textContent = name;
+			if (alike(name, state.turn)) b.className = 'turn-on';
+
+			b.onclick = function () {
+				var next = alike(name, state.turn) ? '' : name;
+
+				state.turn = next;        // отзывается сразу, не дожидаясь опроса
+				showTurns();
+				say();
+				send({ action: 'turn', player: next });
+			};
+
+			turnList.appendChild(b);
+		});
+	}
+
+	document.getElementById('copyLink').addEventListener('click', function () {
+		var link = location.origin + location.pathname + '?url=' + encodeURIComponent(REPORT);
+
+		try { navigator.clipboard.writeText(link); } catch (e) {}
+		document.getElementById('linkHint').textContent = link;
+	});
+
+	// -- Адрес таблицы --------------------------------------------------------
+
+	var setup = document.getElementById('setup');
+	var setupUrl = document.getElementById('setupUrl');
+
+	function askUrl() {
+		setupUrl.value = REPORT;
+		setup.classList.add('on');
+	}
+
+	function urlEntered() {
+		var value = setupUrl.value.trim();
+		if (!value) return void setupUrl.focus();
+
+		REPORT = value;
+		keep(URL_KEY, REPORT);
+		setup.classList.remove('on');
+
+		loadRoster();
+		poll();
+		if (!me) askWho();
+	}
+
+	document.getElementById('setupOk').addEventListener('click', urlEntered);
+	setupUrl.addEventListener('keydown', function (e) { if (e.key === 'Enter') urlEntered(); });
+	status.addEventListener('click', function () { if (!REPORT) askUrl(); });
+
+	// -- Старт ----------------------------------------------------------------
+
+	var known = remembered();
+	if (known) remember(known);
+
+	if (!REPORT) askUrl(); else if (!known) askWho();
+
+	meText.textContent = me || 'кто я?';
+	document.getElementById('openPanel').hidden = !isShowman();
+
+	loadRoster();
+	setInterval(loadRoster, 30000);  // состав приезжает не сразу: ведущий открывает игру позже
+	beat();
+	frame();
+	say();
+})();
+</script>
+</body>
+</html>
