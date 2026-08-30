@@ -431,6 +431,7 @@
 	var NAME_MS = 30 * 24 * 60 * 60 * 1000;
 
 	var me = '', myTable = '';
+	var fromExtension = false;   // ключ стола приехал от расширения - догадки по составу больше не нужны
 	var ask = document.getElementById('ask');
 	var askName = document.getElementById('askName');
 	var askList = document.getElementById('askList');
@@ -447,7 +448,9 @@
 
 	function remember(name, table) {
 		me = name;
-		if (table !== undefined) myTable = table;
+		// Ключ от расширения не перебиваем тем, что стоит на кнопке состава: у соседнего
+		// стола в комнате может оказаться игрок с тем же именем.
+		if (table !== undefined && !fromExtension) myTable = table;
 
 		try {
 			localStorage.setItem(KEY, JSON.stringify({ name: name, ts: Date.now(), table: myTable }));
@@ -478,6 +481,25 @@
 		remember('ведущий', myTable);
 	});
 
+	// Расширение раз в полсекунды говорит фреймам, что происходит за столом; нам оттуда нужен
+	// ключ стола. Игрок берёт его из состава вместе с именем, а ведущего в составе нет, и
+	// адрес комнаты фрейму не виден - у кросс-доменного referrer остаётся один origin.
+	// Без ключа сервер отдаёт колесо, которое трогали последним: при двух играх разом это
+	// запросто чужое.
+	addEventListener('message', function (e) {
+		var d = e.data;
+		if (!d || d.source !== 'si-timer-score' || !d.table) return;
+
+		fromExtension = true;
+		if (d.table === myTable) return;
+
+		myTable = d.table;
+		if (me) remember(me, myTable);
+
+		announce();  // объявление могло уехать не на тот стол
+		poll();
+	});
+
 	function askWho() {
 		askName.value = me;
 		ask.classList.add('on');
@@ -504,6 +526,9 @@
 	// мог смениться. Ведущему стол искать не по чему - берём единственный живой, а если их
 	// несколько, он ткнёт нужный в панели.
 	function keepTable() {
+		// Ключ, приехавший от расширения, точнее любых догадок по составу.
+		if (fromExtension) return;
+
 		if (isShowman()) {
 			if (!myTable && tables.length === 1) remember(me, tables[0].table);
 			return;
