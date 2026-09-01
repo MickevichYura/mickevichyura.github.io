@@ -3218,15 +3218,44 @@
      *
      * Событие start приходит только внутреннему плееру и до того, как ссылка
      * ушла в video, поэтому здесь её ещё можно дополнить медиафрагментом
-     * #t=<секунды>: с ним video открывает файл сразу с нужного места и начала
-     * не показывает вовсе. Внешним плеерам Лампа отдаёт позицию сама, отдельным
-     * полем, их ссылку не трогаем.
+     * #t=<секунды>: с ним video открывает файл сразу с нужного места. Если
+     * медиафрагмент плееру незнаком, перематываем сами - на метаданных, когда
+     * кадра ещё нет и показывать начало файла нечем. Внешним плеерам Лампа
+     * отдаёт позицию сама, отдельным полем, их ссылку не трогаем.
      */
     function followPlayerResume() {
     	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.listener) return;
 
-    	var resume_at = 0; // куда встать в текущем файле
+    	var resume_at = 0; // куда встать в текущем файле, 0 - вставать некуда
     	var resume_view = null;
+
+    	/**
+    	 * Встать на сохранённое место, если плеер этого ещё не сделал
+    	 *
+    	 * Держим позицию до тех пор, пока плеер на неё не встанет: у ранней
+    	 * попытки длительность может быть ещё оценочной, и перемотка упрётся
+    	 * в выдуманный конец файла. Пока не встали, Лампе не мешаем - её
+    	 * собственная перемотка остаётся последней подстраховкой.
+    	 */
+    	var applyResume = function (current) {
+    		if (!resume_at) return;
+
+    		var video = Lampa.PlayerVideo.video();
+    		if (!video) return;
+
+    		if (typeof current !== 'number') current = video.currentTime;
+
+    		if (Math.abs(current - resume_at) < 5) {
+    			if (resume_view) resume_view.continued = true; // место занято, Лампе перематывать нечего
+
+    			resume_at = 0;
+    			resume_view = null;
+
+    			return;
+    		}
+
+    		video.currentTime = resume_at;
+    	};
 
     	Lampa.Player.listener.follow('start', function (data) {
     		resume_at = 0;
@@ -3241,26 +3270,21 @@
     		resume_view = data.timeline;
 
     		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
+
+    		// ссылка уйдёт в video сразу после этого события, и элемент к тому
+    		// времени пересоздадут - забираем его следующим тиком. Метаданные
+    		// ждут ответа сети, раньше этого тика они появиться не могут
+    		setTimeout(function () {
+    			var video = resume_at ? Lampa.PlayerVideo.video() : null;
+
+    			if (video) video.addEventListener('loadedmetadata', function () { applyResume(); }, { once: true });
+    		}, 0);
     	});
 
-    	// плеер мог медиафрагмент не понять - тогда встаём на место сами, но уже
-    	// на первых данных, а не на первом timeupdate, как это делает Лампа
-    	Lampa.PlayerVideo.listener.follow('loadeddata', function (e) {
-    		var seconds = resume_at;
-    		var view = resume_view;
-
-    		resume_at = 0;
-    		resume_view = null;
-
-    		if (!seconds) return;
-
-    		var video = Lampa.PlayerVideo.video();
-    		if (!video) return;
-
-    		var current = e && typeof e.current === 'number' ? e.current : video.currentTime;
-    		if (Math.abs(current - seconds) > 5) video.currentTime = seconds;
-
-    		if (view) view.continued = true; // место занято, Лампе перематывать нечего
+    	// на случай, если метаданные мы прослушали: на первых данных и на
+    	// готовности играть - всё равно раньше, чем первый timeupdate у Лампы
+    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function (e) {
+    		applyResume(e && typeof e.current === 'number' ? e.current : undefined);
     	});
     }
 
