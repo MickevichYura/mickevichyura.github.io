@@ -1074,7 +1074,7 @@
 					if (track.forced) label.push(Lampa.Lang.translate('dlna_track_forced'));
 					if (codec && !track.name) label.push(codec);
 
-					subs.push({ language: language, label: label.join(', ') });
+					subs.push({ language: language, label: label.join(', '), codec: track.codec });
 				}
 			});
 
@@ -3619,8 +3619,13 @@
     		}
 
     		if (text) {
-    			if (parsed.subs.length === text) {
-    				out.subs = parsed.subs;
+    			// плеер показывает только текстовые субтитры, а графические (PGS,
+    			// VobSub) молча пропускает - при несовпадении пробуем без них
+    			var textual = parsed.subs.filter(function (sub) { return String(sub.codec || '').indexOf('S_TEXT') === 0; });
+    			var list = parsed.subs.length === text ? parsed.subs : (textual.length === text ? textual : null);
+
+    			if (list) {
+    				out.subs = list;
 
     				// имя субтитров Лампа ищет по element.index, а её список - это
     				// сами объекты дорожек из плеера, где такого поля нет и поиск
@@ -3629,7 +3634,7 @@
     					if (typeof video.textTracks[i].index !== 'number') video.textTracks[i].index = i;
     				}
     			}
-    			else console.log('DLNA', 'субтитров в файле', parsed.subs.length, 'у плеера', text, '- имена не показываем');
+    			else console.log('DLNA', 'субтитров в файле', parsed.subs.length, '(текстовых', textual.length + ')', 'у плеера', text, '- имена не показываем');
     		}
 
     		if (out.tracks || out.subs) Lampa.PlayerPanel.setTranslate(out);
