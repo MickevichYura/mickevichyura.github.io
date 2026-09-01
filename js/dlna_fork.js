@@ -71,7 +71,8 @@
 
 	var MKV_HEAD_BYTES = 262144; // сколько начала файла тянем ради списка дорожек
 	var HEAD_TIMEOUT = 10000;
-	var TRACKS_DELAY = 2000;     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
+	var TRACKS_DELAY = 2000;
+	var CHOICE_CHECK = 2000;     // как часто смотрим, не переключили ли дорожку     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
 
 	var track_cache = {}; // ссылка на файл -> разобранные дорожки, null если не вышло
 
@@ -1081,6 +1082,50 @@
 			return { tracks: audio, subs: subs };
 		},
 
+		// откуда Лампа берёт субтитры плеера: на Android и webOS список
+		// подкладывает оболочка, а не сам элемент video
+		subsList: function (video) {
+			return (video && (video.customSubs || video.webos_subs || video.textTracks)) || [];
+		},
+
+		/**
+		 * Чем опознаём сериал, чтобы выбор дорожек был у него общим
+		 *
+		 * Карточка TMDB одна на весь сериал, включая сезоны, разложенные по
+		 * разным папкам, - это лучший ключ. Если карточки нет, берём папку,
+		 * через которую вошли с главной: обычно это папка сериала целиком.
+		 */
+		groupKey: function (show, root_title, folder_title) {
+			if (show && show.id) return 'tmdb:' + show.id;
+
+			var name = (show && (show.original_title || show.original_name || show.title || show.name)) || root_title || folder_title || '';
+			name = String(name).trim().toLowerCase();
+
+			return name ? 'name:' + name : '';
+		},
+
+		/**
+		 * Выбор дорожек, запомненный за сериалом
+		 */
+		trackChoice: function (group) {
+			var all = DLNA.store('dlna_tracks', 300, {});
+
+			return group && all[group] ? all[group] : null;
+		},
+
+		saveTrackChoice: function (group, choice) {
+			if (!group) return;
+
+			var all = DLNA.store('dlna_tracks', 300, {});
+			var was = all[group];
+
+			if (was && was.track === choice.track && was.sub === choice.sub) return;
+
+			all[group] = choice;
+
+			DLNA.save('dlna_tracks', all);
+		},
+
 		/**
 		 * Дорожки файла, по возможности из памяти
 		 */
@@ -1800,11 +1845,13 @@
       			var extra = getFile(element);
       			if (extra.file) {
       				var playlist = [];
+      				var group = DLNA.groupKey(object.movie, '', '');
       				var first = {
       					url: extra.file,
                 // quality: extra.quality,
       					timeline: DLNA.playerTimeline(view, element.duration),
       					dlna: true,
+      					dlna_group: group,
       					title: playerTitle(element)
       				};
 
@@ -1816,7 +1863,8 @@
       							url: ex.file,
                     // quality: ex.quality,
       							timeline: DLNA.playerTimeline(elem.timeline, elem.duration),
-      							dlna: true
+      							dlna: true,
+      							dlna_group: group
       						});
       					});
       				} else {
@@ -2884,6 +2932,7 @@
     		var rec = entry.rec;
     		var node = entry.node;
     		var show = rec.show;
+    		var group = DLNA.groupKey(show, rec.root_title, rec.folder_title);
     		var siblings = entry.siblings();
 
     		// плейлист собран по соседям файла; если самого файла там нет, идти дальше некуда
@@ -2893,7 +2942,8 @@
     				title: nodeTitle(n, show),
     				url: DLNA.getProxyURL(n.url),
     				timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration),
-    				dlna: true
+    				dlna: true,
+    				dlna_group: group
     			};
     		}) : [];
 
@@ -2901,7 +2951,8 @@
     			title: nodeTitle(node, show),
     			url: DLNA.getProxyURL(node.url),
     			timeline: DLNA.playerTimeline(entry.view, node.duration),
-    			dlna: true
+    			dlna: true,
+    			dlna_group: group
     		};
     		if (playlist.length > 1) first.playlist = playlist;
 
@@ -3022,19 +3073,22 @@
     		item.on('hover:enter', function () {
     			if (!can_play) return Lampa.Noty.show(Lampa.Lang.translate('dlna_browser_cantplay'));
 
+    			var group = DLNA.groupKey(show || TMDB.cached(node.title), object.root_title, object.folder_title);
     			var playlist = playlist_source.map(function (n) {
     				return {
     					title: _this.playerTitle(n),
     					url: DLNA.getProxyURL(n.url),
     					timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration),
-    					dlna: true
+    					dlna: true,
+    					dlna_group: group
     				};
     			});
     			var first = {
     				title: _this.playerTitle(node),
     				url: url,
     				timeline: DLNA.playerTimeline(view, node.duration),
-    				dlna: true
+    				dlna: true,
+    				dlna_group: group
     			};
     			if (playlist.length > 1) first.playlist = playlist;
 
@@ -3611,7 +3665,7 @@
 
     		// субтитры плеер держит там же, где их ищет сама Лампа: на Android
     		// и webOS список подкладывает оболочка, а не сам video
-    		var list = video.customSubs || video.webos_subs || video.textTracks || [];
+    		var list = DLNA.subsList(video);
     		var items = [];
 
     		// в этот же список Лампа кладёт пункт «Отключено» с index -1, и он
@@ -3688,10 +3742,103 @@
     	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () { push(); });
     }
 
+    /**
+     * Держать выбор дорожек общим для всего сериала
+     *
+     * Внутри одного плейлиста Лампа выбор переносит сама, но между запусками
+     * он теряется: на каждой новой серии снова первая дорожка. Запоминаем
+     * выбранное за сериалом (карточка TMDB или папка, через которую вошли) и
+     * возвращаем его тем же способом, каким Лампа переносит его между сериями.
+     *
+     * Пишем не всё подряд, а только то, что человек переключил руками: первое
+     * прочтение после запуска - это выбор самого плеера, и запоминать его
+     * нельзя, иначе файл с другим набором дорожек затрёт весь сериал.
+     */
+    function followPlayerChoice() {
+    	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.setParams) return;
+
+    	var group = '';
+    	var seen = null;  // что стояло при прошлой проверке
+    	var checked = 0;
+
+    	var current = function () {
+    		var video = Lampa.PlayerVideo.video();
+    		if (!video) return null;
+
+    		var tracks = video.audioTracks || [];
+    		var subs = DLNA.subsList(video);
+
+    		if (!tracks.length) return null; // дорожки ещё не разобраны
+
+    		var choice = { track: -1, sub: -1 };
+
+    		for (var i = 0; i < tracks.length; i++) {
+    			if (tracks[i].enabled || tracks[i].selected) choice.track = i;
+    		}
+
+    		for (var j = 0; j < subs.length; j++) {
+    			var on = subs[j].selected || subs[j].mode === 'showing';
+
+    			if (on && subs[j].index !== -1) choice.sub = typeof subs[j].index === 'number' ? subs[j].index : j;
+    		}
+
+    		return choice;
+    	};
+
+    	Lampa.Player.listener.follow('start', function (data) {
+    		group = data && data.dlna ? data.dlna_group || '' : '';
+    		seen = null;
+    		checked = 0;
+
+    		var choice = DLNA.trackChoice(group);
+    		if (!choice) return;
+
+    		var params = {};
+
+    		if (choice.track >= 0) params.track = choice.track;
+    		if (choice.sub >= 0) params.sub = choice.sub;
+
+    		// тот же вход, которым Лампа переносит выбор с серии на серию:
+    		// разбирая файл, она сама поставит эти дорожки
+    		if (params.track !== undefined || params.sub !== undefined) Lampa.PlayerVideo.setParams(params);
+    	});
+
+    	// эталон снимаем как можно раньше - в этот момент Лампа как раз
+    	// расставила дорожки, а до меню человек ещё не добрался
+    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () {
+    		if (group && !seen) seen = current();
+    	});
+
+    	Lampa.PlayerVideo.listener.follow('timeupdate', function () {
+    		if (!group) return;
+
+    		var now = Date.now();
+    		if (now - checked < CHOICE_CHECK) return;
+
+    		checked = now;
+
+    		var choice = current();
+    		if (!choice) return;
+
+    		if (!seen) {
+    			seen = choice; // дорожек на прошлых событиях ещё не было
+
+    			return;
+    		}
+
+    		if (seen.track === choice.track && seen.sub === choice.sub) return;
+
+    		seen = choice;
+
+    		DLNA.saveTrackChoice(group, choice);
+    	});
+    }
+
     function startPlugin() {
     	addMenuItem();
     	followPlayerResume();
     	followPlayerTracks();
+    	followPlayerChoice();
     }
 
     if (window.appready) startPlugin();
