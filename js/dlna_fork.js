@@ -3613,8 +3613,24 @@
     		var text = video.textTracks ? video.textTracks.length : 0;
     		var out = {};
 
-    		if (audio && parsed.tracks.length === audio) out.tracks = parsed.tracks;
-    		if (text && parsed.subs.length === text) out.subs = parsed.subs;
+    		if (audio) {
+    			if (parsed.tracks.length === audio) out.tracks = parsed.tracks;
+    			else console.log('DLNA', 'аудиодорожек в файле', parsed.tracks.length, 'у плеера', audio, '- имена не показываем');
+    		}
+
+    		if (text) {
+    			if (parsed.subs.length === text) {
+    				out.subs = parsed.subs;
+
+    				// имя субтитров Лампа ищет по element.index, а её список - это
+    				// сами объекты дорожек из плеера, где такого поля нет и поиск
+    				// уходит в пустоту. Проставим порядковый номер сами
+    				for (var i = 0; i < text; i++) {
+    					if (typeof video.textTracks[i].index !== 'number') video.textTracks[i].index = i;
+    				}
+    			}
+    			else console.log('DLNA', 'субтитров в файле', parsed.subs.length, 'у плеера', text, '- имена не показываем');
+    		}
 
     		if (out.tracks || out.subs) Lampa.PlayerPanel.setTranslate(out);
     	};
