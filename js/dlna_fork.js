@@ -795,6 +795,27 @@
 			return copy;
 		},
 
+		/**
+		 * Секунда, с которой начинать файл, или 0 - с начала
+		 *
+		 * Условия те же, что у Лампы в player/timeline.js: первые десять секунд
+		 * не перематываем, досмотренное почти до конца начинаем заново, к самому
+		 * концу не встаём - оставляем 15 секунд. Режимы «спросить» и «сначала»
+		 * обходим стороной, там своё поведение.
+		 */
+		resumeSeconds: function (view) {
+			var mode = Lampa.Storage.field('player_timecode');
+			if (mode === 'again' || mode === 'ask') return 0;
+
+			var time = view ? parseFloat(view.time) : 0;
+			if (!time || isNaN(time) || view.percent >= 90) return 0;
+
+			var end = view.duration ? view.duration - 15 : 0;
+			if (end > 0 && time > end) time = end;
+
+			return time > 10 ? Math.floor(time) : 0;
+		},
+
 		humanSize: function (bytes) {
 			var size = parseInt(bytes);
 			if (!size || isNaN(size)) return '';
@@ -1495,6 +1516,7 @@
       					url: extra.file,
                 // quality: extra.quality,
       					timeline: DLNA.playerTimeline(view, element.duration),
+      					dlna: true,
       					title: playerTitle(element)
       				};
 
@@ -1505,7 +1527,8 @@
       							title: playerTitle(elem),
       							url: ex.file,
                     // quality: ex.quality,
-      							timeline: DLNA.playerTimeline(elem.timeline, elem.duration)
+      							timeline: DLNA.playerTimeline(elem.timeline, elem.duration),
+      							dlna: true
       						});
       					});
       				} else {
@@ -2581,14 +2604,16 @@
     			return {
     				title: nodeTitle(n, show),
     				url: DLNA.getProxyURL(n.url),
-    				timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration)
+    				timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration),
+    				dlna: true
     			};
     		}) : [];
 
     		var first = {
     			title: nodeTitle(node, show),
     			url: DLNA.getProxyURL(node.url),
-    			timeline: DLNA.playerTimeline(entry.view, node.duration)
+    			timeline: DLNA.playerTimeline(entry.view, node.duration),
+    			dlna: true
     		};
     		if (playlist.length > 1) first.playlist = playlist;
 
@@ -2713,13 +2738,15 @@
     				return {
     					title: _this.playerTitle(n),
     					url: DLNA.getProxyURL(n.url),
-    					timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration)
+    					timeline: DLNA.playerTimeline(Lampa.Timeline.view(DLNA.fileHash(n)), n.duration),
+    					dlna: true
     				};
     			});
     			var first = {
     				title: _this.playerTitle(node),
     				url: url,
-    				timeline: DLNA.playerTimeline(view, node.duration)
+    				timeline: DLNA.playerTimeline(view, node.duration),
+    				dlna: true
     			};
     			if (playlist.length > 1) first.playlist = playlist;
 
@@ -3180,10 +3207,72 @@
     	if (!store_writing) DLNA.dropStore(e.name);
     });
 
-    if (window.appready) addMenuItem();
+    /**
+     * Начинать файл сразу с сохранённого места
+     *
+     * Свою перемотку Лампа делает по первому timeupdate - то есть уже показав
+     * начало файла - и считает позицию от video.duration. Большой MKV сообщает
+     * длительность не сразу: пока плеер не дочитал хвост, у него оценка по
+     * битрейту, сохранённая секунда оказывается «за концом», и вместо неё
+     * берётся процент от выдуманной длительности - старт прыгает не туда.
+     *
+     * Событие start приходит только внутреннему плееру и до того, как ссылка
+     * ушла в video, поэтому здесь её ещё можно дополнить медиафрагментом
+     * #t=<секунды>: с ним video открывает файл сразу с нужного места и начала
+     * не показывает вовсе. Внешним плеерам Лампа отдаёт позицию сама, отдельным
+     * полем, их ссылку не трогаем.
+     */
+    function followPlayerResume() {
+    	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.listener) return;
+
+    	var resume_at = 0; // куда встать в текущем файле
+    	var resume_view = null;
+
+    	Lampa.Player.listener.follow('start', function (data) {
+    		resume_at = 0;
+    		resume_view = null;
+
+    		if (!data || !data.dlna || typeof data.url !== 'string') return;
+
+    		var seconds = DLNA.resumeSeconds(data.timeline);
+    		if (!seconds) return;
+
+    		resume_at = seconds;
+    		resume_view = data.timeline;
+
+    		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
+    	});
+
+    	// плеер мог медиафрагмент не понять - тогда встаём на место сами, но уже
+    	// на первых данных, а не на первом timeupdate, как это делает Лампа
+    	Lampa.PlayerVideo.listener.follow('loadeddata', function (e) {
+    		var seconds = resume_at;
+    		var view = resume_view;
+
+    		resume_at = 0;
+    		resume_view = null;
+
+    		if (!seconds) return;
+
+    		var video = Lampa.PlayerVideo.video();
+    		if (!video) return;
+
+    		var current = e && typeof e.current === 'number' ? e.current : video.currentTime;
+    		if (Math.abs(current - seconds) > 5) video.currentTime = seconds;
+
+    		if (view) view.continued = true; // место занято, Лампе перематывать нечего
+    	});
+    }
+
+    function startPlugin() {
+    	addMenuItem();
+    	followPlayerResume();
+    }
+
+    if (window.appready) startPlugin();
     else {
     	Lampa.Listener.follow('app', function (e) {
-    		if (e.type == 'ready') addMenuItem();
+    		if (e.type == 'ready') startPlugin();
     	});
     }
 
