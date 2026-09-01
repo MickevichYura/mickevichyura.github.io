@@ -69,6 +69,33 @@
 	// поля узла, без которых не нарисовать строку и не запустить файл
 	var SNAP_FIELDS = ['id', 'title', 'type', 'size', 'duration', 'resolution', 'url', 'childCount', 'upnp:episodeSeason', 'upnp:episodeNumber'];
 
+	var MKV_HEAD_BYTES = 262144; // сколько начала файла тянем ради списка дорожек
+	var HEAD_TIMEOUT = 10000;
+	var TRACKS_DELAY = 2000;     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
+
+	var track_cache = {}; // ссылка на файл -> разобранные дорожки, null если не вышло
+
+	// трёхбуквенные коды контейнера -> двухбуквенные, под ними у Лампы переводы
+	var LANG_SHORT = {
+		alb: 'sq', ara: 'ar', arm: 'hy', aze: 'az', bel: 'be', bul: 'bg', chi: 'zh', ces: 'cs',
+		cze: 'cs', dan: 'da', deu: 'de', dut: 'nl', ell: 'el', eng: 'en', est: 'et', fas: 'fa',
+		fin: 'fi', fra: 'fr', fre: 'fr', geo: 'ka', ger: 'de', gre: 'el', heb: 'he', hin: 'hi',
+		hrv: 'hr', hun: 'hu', hye: 'hy', ice: 'is', isl: 'is', ita: 'it', jpn: 'ja', kat: 'ka',
+		kaz: 'kk', kor: 'ko', lav: 'lv', lit: 'lt', mkd: 'mk', nld: 'nl', nor: 'no', per: 'fa',
+		pol: 'pl', por: 'pt', ron: 'ro', rum: 'ro', rus: 'ru', slk: 'sk', slo: 'sk', slv: 'sl',
+		spa: 'es', srp: 'sr', swe: 'sv', tur: 'tr', ukr: 'uk', uzb: 'uz', vie: 'vi', zho: 'zh'
+	};
+
+	// CodecID контейнера -> то, что принято писать на коробке
+	var CODEC_NAMES = {
+		A_AC3: 'Dolby Digital', A_EAC3: 'Dolby Digital+', A_TRUEHD: 'TrueHD', A_MLP: 'MLP',
+		A_DTS: 'DTS', 'A_DTS/EXPRESS': 'DTS Express', 'A_DTS/LOSSLESS': 'DTS-HD MA',
+		A_OPUS: 'Opus', A_FLAC: 'FLAC', A_VORBIS: 'Vorbis', A_ALAC: 'ALAC',
+		'A_MPEG/L3': 'MP3', 'A_MPEG/L2': 'MP2',
+		'S_TEXT/UTF8': 'SRT', 'S_TEXT/ASS': 'ASS', 'S_TEXT/SSA': 'SSA', 'S_TEXT/WEBVTT': 'WebVTT',
+		'S_HDMV/PGS': 'PGS', 'S_HDMV/TEXTST': 'TextST', S_VOBSUB: 'VobSub', S_DVBSUB: 'DVB'
+	};
+
 	var browse_cache = {}; // ключ -> { time, nodes }
 	var browse_wait = {};  // ключ -> запрос в полёте, чтобы одну папку не спрашивать дважды разом
 	var tree_stale = false; // снимок главной страницы пора перечитать
@@ -814,6 +841,267 @@
 			if (end > 0 && time > end) time = end;
 
 			return time > 10 ? Math.floor(time) : 0;
+		},
+
+		/**
+		 * Человеческое название языка дорожки
+		 *
+		 * В контейнере лежит трёхбуквенный код (rus, eng), а у Лампы языки
+		 * переведены под ключами filter_lang_<две буквы>. Чего в словаре нет,
+		 * показываем как есть, заглавными.
+		 */
+		languageTitle: function (code) {
+			var value = String(code || '').trim().toLowerCase().replace(/_/g, '-').split('-')[0];
+			if (!value || value === 'und' || value === 'mis' || value === 'zxx') return '';
+
+			var short = LANG_SHORT[value] || (value.length === 2 ? value : '');
+
+			if (short) {
+				var key = 'filter_lang_' + short;
+				var name = Lampa.Lang.translate(key);
+
+				if (name && name !== key) return name;
+			}
+
+			return value.toUpperCase();
+		},
+
+		codecTitle: function (codec) {
+			var value = String(codec || '').trim().toUpperCase();
+			if (!value) return '';
+
+			if (CODEC_NAMES[value]) return CODEC_NAMES[value];
+			if (value.indexOf('A_AAC') === 0) return 'AAC';
+			if (value.indexOf('A_DTS') === 0) return 'DTS';
+			if (value.indexOf('A_PCM') === 0) return 'PCM';
+			if (value.indexOf('A_MPEG/L3') === 0) return 'MP3';
+
+			return value.replace(/^[AS]_/, '').replace(/\//g, ' ');
+		},
+
+		/**
+		 * Начало файла с сервера
+		 *
+		 * Просим кусок заголовка через Range. Сервер вправе про Range не знать
+		 * и молча начать отдавать все десять гигабайт - такую отдачу обрываем
+		 * и остаёмся ни с чем: имена дорожек того не стоят.
+		 */
+		fetchHead: function (url, bytes) {
+			return new Promise(function (resolve) {
+				var xhr = new XMLHttpRequest();
+				var done = false;
+				var finish = function (value) {
+					if (done) return;
+
+					done = true;
+					resolve(value);
+				};
+
+				try {
+					xhr.open('GET', url, true);
+					xhr.responseType = 'arraybuffer';
+					xhr.timeout = HEAD_TIMEOUT;
+					xhr.setRequestHeader('Range', 'bytes=0-' + (bytes - 1));
+				} catch (e) {
+					return finish(null);
+				}
+
+				xhr.onload = function () { finish(xhr.status === 206 ? xhr.response : null); };
+				xhr.onerror = function () { finish(null); };
+				xhr.ontimeout = function () { finish(null); };
+				xhr.onprogress = function (e) {
+					if (e.loaded > bytes * 2) {
+						xhr.abort();
+						finish(null);
+					}
+				};
+
+				xhr.send();
+			});
+		},
+
+		/**
+		 * Дорожки из заголовка Matroska
+		 *
+		 * EBML - это дерево из элементов «идентификатор, длина, содержимое»,
+		 * где длина позволяет перешагнуть через то, что нам не нужно. Спускаемся
+		 * только в Segment и Tracks, всё остальное перешагиваем; если файл
+		 * оборвался раньше, чем встретился Tracks, возвращаем null.
+		 */
+		matroskaTracks: function (buffer) {
+			var data = new Uint8Array(buffer);
+
+			// EBML-заголовок: без него это не Matroska и разбирать нечего
+			if (data.length < 4 || data[0] !== 0x1A || data[1] !== 0x45 || data[2] !== 0xDF || data[3] !== 0xA3) return null;
+
+			var decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
+			var found = [];
+			var pos = 0;
+
+			// число переменной длины: старшие нули первого байта задают размер,
+			// у идентификатора маркерный бит остаётся частью значения
+			function vint(keep) {
+				if (pos >= data.length) return null;
+
+				var first = data[pos];
+				var mask = 0x80;
+				var length = 1;
+
+				while (length <= 8 && !(first & mask)) {
+					mask >>= 1;
+					length++;
+				}
+
+				if (length > 8 || pos + length > data.length) {
+					pos = data.length;
+					return null;
+				}
+
+				var value = keep ? first : first & (mask - 1);
+				var unknown = !keep && (first & (mask - 1)) === mask - 1;
+
+				for (var i = 1; i < length; i++) {
+					value = value * 256 + data[pos + i];
+					if (!keep && data[pos + i] !== 0xFF) unknown = false;
+				}
+
+				pos += length;
+
+				return unknown ? -1 : value; // -1: длина не указана, элемент тянется до конца родителя
+			}
+
+			function uint(from, to) {
+				var value = 0;
+
+				for (var i = from; i < to; i++) value = value * 256 + data[i];
+
+				return value;
+			}
+
+			function text(from, to) {
+				var slice = data.subarray(from, to);
+				var value = '';
+
+				try {
+					value = decoder ? decoder.decode(slice) : decodeURIComponent(escape(String.fromCharCode.apply(null, slice)));
+				} catch (e) {
+					value = String.fromCharCode.apply(null, slice);
+				}
+
+				return value.replace(/\0+$/, '').trim();
+			}
+
+			// одна дорожка: имя, язык, кодек, каналы
+			function entry(end) {
+				var track = { type: 0, codec: '', name: '', language: '', channels: 0, forced: false };
+
+				while (pos < end) {
+					var id = vint(true);
+					if (id === null) return;
+
+					var size = vint(false);
+					if (size === null) return;
+
+					var stop = size < 0 ? end : Math.min(end, pos + size);
+
+					if (id === 0x83) track.type = uint(pos, stop);
+					else if (id === 0x86) track.codec = text(pos, stop);
+					else if (id === 0x536E) track.name = text(pos, stop);
+					else if (id === 0x22B59C && !track.language) track.language = text(pos, stop);
+					else if (id === 0x22B59D) track.language = text(pos, stop); // BCP47 точнее, он и главнее
+					else if (id === 0x55AA) track.forced = uint(pos, stop) === 1;
+					else if (id === 0xE1) {
+						while (pos < stop) {
+							var aid = vint(true);
+							if (aid === null) break;
+
+							var asize = vint(false);
+							if (asize === null) break;
+
+							var astop = asize < 0 ? stop : Math.min(stop, pos + asize);
+
+							if (aid === 0x9F) track.channels = uint(pos, astop);
+
+							pos = astop;
+						}
+					}
+
+					pos = stop;
+				}
+
+				found.push(track);
+			}
+
+			// Segment и Tracks проходим насквозь, остальное перешагиваем
+			function scan(end) {
+				while (pos < end && pos < data.length) {
+					var id = vint(true);
+					if (id === null) return;
+
+					var size = vint(false);
+					if (size === null) return;
+
+					var stop = size < 0 ? end : Math.min(end, pos + size);
+
+					if (id === 0x18538067 || id === 0x1654AE6B) scan(stop);
+					else if (id === 0xAE) entry(stop);
+
+					pos = stop;
+				}
+			}
+
+			scan(data.length);
+
+			if (!found.length) return null;
+
+			var audio = [];
+			var subs = [];
+
+			found.forEach(function (track) {
+				var language = DLNA.languageTitle(track.language);
+				var codec = DLNA.codecTitle(track.codec);
+
+				if (track.type === 2) audio.push({
+					language: language,
+					label: track.name,
+					extra: { channels: track.channels || '', fourCC: codec }
+				});
+
+				if (track.type === 17) {
+					var label = [];
+
+					if (track.name) label.push(track.name);
+					if (track.forced) label.push(Lampa.Lang.translate('dlna_track_forced'));
+					if (codec && !track.name) label.push(codec);
+
+					subs.push({ language: language, label: label.join(', ') });
+				}
+			});
+
+			return { tracks: audio, subs: subs };
+		},
+
+		/**
+		 * Дорожки файла, по возможности из памяти
+		 */
+		trackInfo: function (url) {
+			var key = String(url || '').split('#')[0];
+			if (!key) return Promise.resolve(null);
+			if (track_cache.hasOwnProperty(key)) return Promise.resolve(track_cache[key]);
+
+			return DLNA.fetchHead(key, MKV_HEAD_BYTES).then(function (buffer) {
+				var info = null;
+
+				try {
+					info = buffer ? DLNA.matroskaTracks(buffer) : null;
+				} catch (e) {
+					console.error('DLNA', 'заголовок файла не разобрался:', e.message);
+				}
+
+				track_cache[key] = info;
+
+				return info;
+			});
 		},
 
 		humanSize: function (bytes) {
@@ -3061,6 +3349,13 @@
     		zh: '服务器 %s 有响应，但未返回文件列表。可能需要代理',
     		bg: 'Сървърът %s отговаря, но не връща списък с файлове. Може да е нужно прокси'
     	},
+    	dlna_track_forced: {
+    		ru: 'форсированные',
+    		uk: 'форсовані',
+    		en: 'forced',
+    		zh: '强制',
+    		bg: 'форсирани'
+    	},
     	dlna_browser_cantplay: {
     		ru: 'Этот файл нельзя воспроизвести',
     		uk: 'Цей файл неможливо відтворити',
@@ -3288,9 +3583,74 @@
     	});
     }
 
+    /**
+     * Показать в плеере, что за дорожки внутри файла
+     *
+     * Из MKV плеер достаёт только язык, а имя дорожки - студию озвучки, пометку
+     * «форсированные», кодек - оставляет лежать в контейнере. Лампа умеет их
+     * показывать, если передать ей готовый список: панель держит объект
+     * переводов по ссылке и собирает меню в момент открытия, поэтому имена
+     * можно дослать уже после запуска - старт файла их не ждёт.
+     *
+     * Порядок в списке - это порядок дорожек у плеера. Если плеер понял не все
+     * (дорожку с незнакомым кодеком он просто не покажет), имена съедут на
+     * соседние, и такой список лучше не показывать вовсе: молчим, пока счёт
+     * дорожек не сойдётся с нашим.
+     */
+    function followPlayerTracks() {
+    	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerPanel || !Lampa.PlayerPanel.setTranslate) return;
+
+    	var parsed = null; // дорожки текущего файла
+    	var token = 0;     // ответ про прошлый файл в текущий не пускаем
+
+    	var push = function () {
+    		if (!parsed) return;
+
+    		var video = Lampa.PlayerVideo.video();
+    		if (!video) return;
+
+    		var audio = video.audioTracks ? video.audioTracks.length : 0;
+    		var text = video.textTracks ? video.textTracks.length : 0;
+    		var out = {};
+
+    		if (audio && parsed.tracks.length === audio) out.tracks = parsed.tracks;
+    		if (text && parsed.subs.length === text) out.subs = parsed.subs;
+
+    		if (out.tracks || out.subs) Lampa.PlayerPanel.setTranslate(out);
+    	};
+
+    	Lampa.Player.listener.follow('start', function (data) {
+    		parsed = null;
+    		token++;
+
+    		if (!data || !data.dlna || typeof data.url !== 'string') return;
+
+    		var mine = token;
+    		var url = data.url;
+
+    		// за заголовком идём не сразу: в первые секунды сервер занят тем, что
+    		// набивает буфер плееру, а меню дорожек так рано никто не открывает
+    		setTimeout(function () {
+    			if (mine !== token) return;
+
+    			DLNA.trackInfo(url).then(function (info) {
+    				if (mine !== token || !info) return;
+
+    				parsed = info;
+
+    				push();
+    			});
+    		}, TRACKS_DELAY);
+    	});
+
+    	// дорожки у плеера появляются вместе с данными, а не со ссылкой
+    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () { push(); });
+    }
+
     function startPlugin() {
     	addMenuItem();
     	followPlayerResume();
+    	followPlayerTracks();
     }
 
     if (window.appready) startPlugin();
