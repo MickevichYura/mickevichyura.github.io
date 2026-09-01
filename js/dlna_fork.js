@@ -3609,8 +3609,19 @@
     		var video = Lampa.PlayerVideo.video();
     		if (!video) return;
 
+    		// субтитры плеер держит там же, где их ищет сама Лампа: на Android
+    		// и webOS список подкладывает оболочка, а не сам video
+    		var list = video.customSubs || video.webos_subs || video.textTracks || [];
+    		var items = [];
+
+    		// в этот же список Лампа кладёт пункт «Отключено» с index -1, и он
+    		// сдвинул бы нумерацию, если меню уже открывали
+    		for (var n = 0; n < list.length; n++) {
+    			if (list[n] && list[n].index !== -1) items.push(list[n]);
+    		}
+
     		var audio = video.audioTracks ? video.audioTracks.length : 0;
-    		var text = video.textTracks ? video.textTracks.length : 0;
+    		var text = items.length;
     		var out = {};
 
     		if (audio) {
@@ -3622,20 +3633,29 @@
     			// плеер показывает только текстовые субтитры, а графические (PGS,
     			// VobSub) молча пропускает - при несовпадении пробуем без них
     			var textual = parsed.subs.filter(function (sub) { return String(sub.codec || '').indexOf('S_TEXT') === 0; });
-    			var list = parsed.subs.length === text ? parsed.subs : (textual.length === text ? textual : null);
+    			var names = parsed.subs.length === text ? parsed.subs : (textual.length === text ? textual : null);
 
-    			if (list) {
-    				out.subs = list;
+    			if (names) {
+    				// имя субтитров Лампа ищет не по месту в списке, а по полю index
+    				// самой дорожки. У дорожки из контейнера его нет - тогда ставим
+    				// порядковый сами; если оболочка его уже проставила, раскладываем
+    				// имена по её нумерации, какой бы она ни была
+    				var by_index = [];
 
-    				// имя субтитров Лампа ищет по element.index, а её список - это
-    				// сами объекты дорожек из плеера, где такого поля нет и поиск
-    				// уходит в пустоту. Проставим порядковый номер сами
     				for (var i = 0; i < text; i++) {
-    					if (typeof video.textTracks[i].index !== 'number') video.textTracks[i].index = i;
+    					var item = items[i];
+    					var key = typeof item.index === 'number' && item.index >= 0 ? item.index : i;
+
+    					if (typeof item.index !== 'number') item.index = i;
+
+    					by_index[key] = names[i];
     				}
+
+    				out.subs = by_index;
     			}
     			else console.log('DLNA', 'субтитров в файле', parsed.subs.length, '(текстовых', textual.length + ')', 'у плеера', text, '- имена не показываем');
     		}
+    		else if (parsed.subs.length) console.log('DLNA', 'плеер не показал ни одной дорожки субтитров, а в файле их', parsed.subs.length);
 
     		if (out.tracks || out.subs) Lampa.PlayerPanel.setTranslate(out);
     	};
