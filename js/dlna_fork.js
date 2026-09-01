@@ -71,7 +71,7 @@
 
 	var MKV_HEAD_BYTES = 262144; // сколько начала файла тянем ради списка дорожек
 	var HEAD_TIMEOUT = 10000;
-	var TRACKS_DELAY = 2000;
+	var TRACKS_DELAY = 1000;
 	var CHOICE_CHECK = 2000;     // как часто смотрим, не переключили ли дорожку     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
 
 	var track_cache = {}; // ссылка на файл -> разобранные дорожки, null если не вышло
@@ -1119,7 +1119,9 @@
 			var all = DLNA.store('dlna_tracks', 300, {});
 			var was = all[group];
 
-			if (was && was.track === choice.track && was.sub === choice.sub) return;
+			// имена важнее номеров: пока их не знали, могли записать пустые
+			if (was && was.track === choice.track && was.sub === choice.sub &&
+				was.track_name === choice.track_name && was.sub_name === choice.sub_name) return;
 
 			all[group] = choice;
 
@@ -3638,7 +3640,7 @@
     }
 
     /**
-     * Показать в плеере, что за дорожки внутри файла
+     * Дорожки файла: показать их имена и держать выбор общим для сериала
      *
      * Из MKV плеер достаёт только язык, а имя дорожки - студию озвучки, пометку
      * «форсированные», кодек - оставляет лежать в контейнере. Лампа умеет их
@@ -3646,85 +3648,220 @@
      * переводов по ссылке и собирает меню в момент открытия, поэтому имена
      * можно дослать уже после запуска - старт файла их не ждёт.
      *
-     * Порядок в списке - это порядок дорожек у плеера. Если плеер понял не все
-     * (дорожку с незнакомым кодеком он просто не покажет), имена съедут на
-     * соседние, и такой список лучше не показывать вовсе: молчим, пока счёт
-     * дорожек не сойдётся с нашим.
+     * Эти же имена держат выбор дорожек общим для всего сериала. Внутри одного
+     * плейлиста Лампа переносит выбор сама, но между запусками он теряется, и
+     * на каждой новой серии снова первая дорожка. Запоминаем выбранное за
+     * сериалом - по карточке TMDB, если она есть, иначе по папке.
+     *
+     * Возвращаем в два приёма. Сразу на старте - по номеру, тем же входом,
+     * которым Лампа переносит выбор с серии на серию: дорожка встаёт до
+     * первого кадра. А когда приедет заголовок, сверяем имя: если в этой серии
+     * набор дорожек другой и номер увёл к чужой озвучке, переставляем по имени.
+     * В обычном случае, когда набор совпадает, не происходит ничего.
      */
     function followPlayerTracks() {
     	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerPanel || !Lampa.PlayerPanel.setTranslate) return;
 
-    	var parsed = null; // дорожки текущего файла
-    	var token = 0;     // ответ про прошлый файл в текущий не пускаем
+    	var parsed = null; // дорожки текущего файла, разобранные из заголовка
+    	var group = '';    // сериал, за которым помним выбор
+    	var want = null;   // что выбрали в прошлый раз
+    	var seen = null;   // что стояло при прошлой проверке
+    	var logged = false;
+    	var checked = 0;
+    	var token = 0;
 
-    	var push = function () {
-    		if (!parsed) return;
+    	// чем узнаём дорожку в другой серии: язык плюс имя от студии
+    	var sign = function (item) { return item ? (item.language || '') + '|' + (item.label || '') : ''; };
 
+    	// списки плеера, без служебного пункта «Отключено» среди субтитров
+    	var lists = function () {
     		var video = Lampa.PlayerVideo.video();
-    		if (!video) return;
+    		if (!video) return null;
 
-    		// субтитры плеер держит там же, где их ищет сама Лампа: на Android
-    		// и webOS список подкладывает оболочка, а не сам video
-    		var list = DLNA.subsList(video);
-    		var items = [];
+    		var all = DLNA.subsList(video);
+    		var subs = [];
 
-    		// в этот же список Лампа кладёт пункт «Отключено» с index -1, и он
-    		// сдвинул бы нумерацию, если меню уже открывали
-    		for (var n = 0; n < list.length; n++) {
-    			if (list[n] && list[n].index !== -1) items.push(list[n]);
+    		for (var n = 0; n < all.length; n++) {
+    			if (all[n] && all[n].index !== -1) subs.push(all[n]);
     		}
 
-    		var audio = video.audioTracks ? video.audioTracks.length : 0;
-    		var text = items.length;
+    		return { tracks: video.audioTracks || [], subs: subs };
+    	};
+
+    	/**
+    	 * Имена из файла под списки плеера
+    	 *
+    	 * Порядок совпадает, а счёт может и не сойтись: дорожку с незнакомым
+    	 * кодеком плеер не покажет, графические субтитры (PGS, VobSub) тоже.
+    	 * Если не сходится даже без них, имён не даём вовсе - лучше никаких,
+    	 * чем чужие.
+    	 */
+    	var named = function (now) {
+    		if (!parsed || !now) return null;
+
+    		var out = { tracks: null, subs: null };
+    		var say = function () { if (!logged) console.log.apply(console, ['DLNA'].concat([].slice.call(arguments))); };
+
+    		if (now.tracks.length) {
+    			if (parsed.tracks.length === now.tracks.length) out.tracks = parsed.tracks;
+    			else say('аудиодорожек в файле', parsed.tracks.length, 'у плеера', now.tracks.length, '- имена не показываем');
+    		}
+
+    		if (now.subs.length) {
+    			var textual = parsed.subs.filter(function (sub) { return String(sub.codec || '').indexOf('S_TEXT') === 0; });
+
+    			if (parsed.subs.length === now.subs.length) out.subs = parsed.subs;
+    			else if (textual.length === now.subs.length) out.subs = textual;
+    			else say('субтитров в файле', parsed.subs.length, '(текстовых', textual.length + ')', 'у плеера', now.subs.length, '- имена не показываем');
+    		}
+    		else if (parsed.subs.length) say('плеер не показал ни одной дорожки субтитров, а в файле их', parsed.subs.length);
+
+    		logged = true;
+
+    		return out;
+    	};
+
+    	// имена в меню плеера
+    	var show = function (now, list) {
     		var out = {};
 
-    		if (audio) {
-    			if (parsed.tracks.length === audio) out.tracks = parsed.tracks;
-    			else console.log('DLNA', 'аудиодорожек в файле', parsed.tracks.length, 'у плеера', audio, '- имена не показываем');
-    		}
+    		if (list.tracks) out.tracks = list.tracks;
 
-    		if (text) {
-    			// плеер показывает только текстовые субтитры, а графические (PGS,
-    			// VobSub) молча пропускает - при несовпадении пробуем без них
-    			var textual = parsed.subs.filter(function (sub) { return String(sub.codec || '').indexOf('S_TEXT') === 0; });
-    			var names = parsed.subs.length === text ? parsed.subs : (textual.length === text ? textual : null);
+    		if (list.subs) {
+    			// имя субтитров Лампа ищет не по месту в списке, а по полю index
+    			// самой дорожки. У дорожки из контейнера его нет - тогда ставим
+    			// порядковый сами; если оболочка его уже проставила, раскладываем
+    			// имена по её нумерации, какой бы она ни была
+    			var by_index = [];
 
-    			if (names) {
-    				// имя субтитров Лампа ищет не по месту в списке, а по полю index
-    				// самой дорожки. У дорожки из контейнера его нет - тогда ставим
-    				// порядковый сами; если оболочка его уже проставила, раскладываем
-    				// имена по её нумерации, какой бы она ни была
-    				var by_index = [];
+    			for (var i = 0; i < now.subs.length; i++) {
+    				var item = now.subs[i];
+    				var key = typeof item.index === 'number' && item.index >= 0 ? item.index : i;
 
-    				for (var i = 0; i < text; i++) {
-    					var item = items[i];
-    					var key = typeof item.index === 'number' && item.index >= 0 ? item.index : i;
+    				if (typeof item.index !== 'number') item.index = i;
 
-    					if (typeof item.index !== 'number') item.index = i;
-
-    					by_index[key] = names[i];
-    				}
-
-    				out.subs = by_index;
+    				by_index[key] = list.subs[i];
     			}
-    			else console.log('DLNA', 'субтитров в файле', parsed.subs.length, '(текстовых', textual.length + ')', 'у плеера', text, '- имена не показываем');
+
+    			out.subs = by_index;
     		}
-    		else if (parsed.subs.length) console.log('DLNA', 'плеер не показал ни одной дорожки субтитров, а в файле их', parsed.subs.length);
 
     		if (out.tracks || out.subs) Lampa.PlayerPanel.setTranslate(out);
     	};
 
+    	// что сейчас выбрано, вместе с именами - их и запоминаем
+    	var pick = function (now, list) {
+    		var out = { track: -1, sub: -1, track_name: '', sub_name: '' };
+
+    		for (var i = 0; i < now.tracks.length; i++) {
+    			if (now.tracks[i].enabled || now.tracks[i].selected) out.track = i;
+    		}
+
+    		for (var j = 0; j < now.subs.length; j++) {
+    			if (now.subs[j].selected || now.subs[j].mode === 'showing') {
+    				out.sub = typeof now.subs[j].index === 'number' ? now.subs[j].index : j;
+
+    				if (list && list.subs) out.sub_name = sign(list.subs[j]);
+    			}
+    		}
+
+    		if (out.track >= 0 && list && list.tracks) out.track_name = sign(list.tracks[out.track]);
+
+    		return out;
+    	};
+
+    	// поставить то, что выбирали, если номер указал на чужую дорожку
+    	var correct = function (now, list) {
+    		if (!want) return false;
+
+    		var moved = false;
+    		var at = pick(now, list);
+
+    		if (list.tracks && want.track_name && at.track_name !== want.track_name) {
+    			for (var t = 0; t < now.tracks.length; t++) {
+    				if (sign(list.tracks[t]) !== want.track_name) continue;
+
+    				console.log('DLNA', 'дорожка по имени:', want.track_name, '- номер', t, 'вместо', at.track);
+
+    				for (var e = 0; e < now.tracks.length; e++) {
+    					now.tracks[e].enabled = false;
+    					now.tracks[e].selected = false;
+    				}
+
+    				now.tracks[t].enabled = true;
+    				now.tracks[t].selected = true;
+    				moved = true;
+
+    				break;
+    			}
+    		}
+
+    		if (list.subs && want.sub_name && at.sub_name !== want.sub_name) {
+    			for (var u = 0; u < now.subs.length; u++) {
+    				if (sign(list.subs[u]) !== want.sub_name) continue;
+
+    				console.log('DLNA', 'субтитры по имени:', want.sub_name, '- номер', u);
+
+    				for (var d = 0; d < now.subs.length; d++) {
+    					now.subs[d].mode = 'disabled';
+    					now.subs[d].selected = false;
+    				}
+
+    				now.subs[u].mode = 'showing';
+    				now.subs[u].selected = true;
+    				moved = true;
+
+    				if (Lampa.PlayerVideo.subsview) Lampa.PlayerVideo.subsview(true);
+
+    				break;
+    			}
+    		}
+
+    		return moved;
+    	};
+
+    	var apply = function () {
+    		var now = lists();
+    		var list = named(now);
+
+    		if (!now || !list) return;
+
+    		show(now, list);
+
+    		// переставили сами - эталон снимем заново, это не выбор человека
+    		if (correct(now, list)) seen = null;
+    	};
+
     	Lampa.Player.listener.follow('start', function (data) {
     		parsed = null;
+    		group = '';
+    		want = null;
+    		seen = null;
+    		logged = false;
+    		checked = 0;
     		token++;
 
     		if (!data || !data.dlna || typeof data.url !== 'string') return;
 
+    		group = data.dlna_group || '';
+    		want = DLNA.trackChoice(group);
+
+    		if (want) {
+    			var params = {};
+
+    			if (want.track >= 0) params.track = want.track;
+    			if (want.sub >= 0) params.sub = want.sub;
+
+    			// тот же вход, которым Лампа переносит выбор с серии на серию:
+    			// разбирая файл, она сама поставит эти дорожки
+    			if (params.track !== undefined || params.sub !== undefined) Lampa.PlayerVideo.setParams(params);
+    		}
+
     		var mine = token;
     		var url = data.url;
 
-    		// за заголовком идём не сразу: в первые секунды сервер занят тем, что
-    		// набивает буфер плееру, а меню дорожек так рано никто не открывает
+    		// за заголовком идём не сразу: в первые мгновения сервер занят тем,
+    		// что набивает буфер плееру
     		setTimeout(function () {
     			if (mine !== token) return;
 
@@ -3733,92 +3870,36 @@
 
     				parsed = info;
 
-    				push();
+    				apply();
     			});
     		}, TRACKS_DELAY);
     	});
 
     	// дорожки у плеера появляются вместе с данными, а не со ссылкой
-    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () { push(); });
-    }
-
-    /**
-     * Держать выбор дорожек общим для всего сериала
-     *
-     * Внутри одного плейлиста Лампа выбор переносит сама, но между запусками
-     * он теряется: на каждой новой серии снова первая дорожка. Запоминаем
-     * выбранное за сериалом (карточка TMDB или папка, через которую вошли) и
-     * возвращаем его тем же способом, каким Лампа переносит его между сериями.
-     *
-     * Пишем не всё подряд, а только то, что человек переключил руками: первое
-     * прочтение после запуска - это выбор самого плеера, и запоминать его
-     * нельзя, иначе файл с другим набором дорожек затрёт весь сериал.
-     */
-    function followPlayerChoice() {
-    	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.setParams) return;
-
-    	var group = '';
-    	var seen = null;  // что стояло при прошлой проверке
-    	var checked = 0;
-
-    	var current = function () {
-    		var video = Lampa.PlayerVideo.video();
-    		if (!video) return null;
-
-    		var tracks = video.audioTracks || [];
-    		var subs = DLNA.subsList(video);
-
-    		if (!tracks.length) return null; // дорожки ещё не разобраны
-
-    		var choice = { track: -1, sub: -1 };
-
-    		for (var i = 0; i < tracks.length; i++) {
-    			if (tracks[i].enabled || tracks[i].selected) choice.track = i;
-    		}
-
-    		for (var j = 0; j < subs.length; j++) {
-    			var on = subs[j].selected || subs[j].mode === 'showing';
-
-    			if (on && subs[j].index !== -1) choice.sub = typeof subs[j].index === 'number' ? subs[j].index : j;
-    		}
-
-    		return choice;
-    	};
-
-    	Lampa.Player.listener.follow('start', function (data) {
-    		group = data && data.dlna ? data.dlna_group || '' : '';
-    		seen = null;
-    		checked = 0;
-
-    		var choice = DLNA.trackChoice(group);
-    		if (!choice) return;
-
-    		var params = {};
-
-    		if (choice.track >= 0) params.track = choice.track;
-    		if (choice.sub >= 0) params.sub = choice.sub;
-
-    		// тот же вход, которым Лампа переносит выбор с серии на серию:
-    		// разбирая файл, она сама поставит эти дорожки
-    		if (params.track !== undefined || params.sub !== undefined) Lampa.PlayerVideo.setParams(params);
-    	});
-
-    	// эталон снимаем как можно раньше - в этот момент Лампа как раз
-    	// расставила дорожки, а до меню человек ещё не добрался
     	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () {
-    		if (group && !seen) seen = current();
+    		apply();
+
+    		// эталон снимаем как можно раньше: Лампа как раз расставила дорожки,
+    		// а до меню человек ещё не добрался
+    		if (group && !seen) {
+    			var now = lists();
+
+    			if (now && now.tracks.length) seen = pick(now, named(now) || {});
+    		}
     	});
 
     	Lampa.PlayerVideo.listener.follow('timeupdate', function () {
     		if (!group) return;
 
-    		var now = Date.now();
-    		if (now - checked < CHOICE_CHECK) return;
+    		var time = Date.now();
+    		if (time - checked < CHOICE_CHECK) return;
 
-    		checked = now;
+    		checked = time;
 
-    		var choice = current();
-    		if (!choice) return;
+    		var now = lists();
+    		if (!now || !now.tracks.length) return;
+
+    		var choice = pick(now, named(now) || {});
 
     		if (!seen) {
     			seen = choice; // дорожек на прошлых событиях ещё не было
@@ -3829,6 +3910,7 @@
     		if (seen.track === choice.track && seen.sub === choice.sub) return;
 
     		seen = choice;
+    		want = choice; // дальше сверяемся уже с этим выбором
 
     		DLNA.saveTrackChoice(group, choice);
     	});
@@ -3838,7 +3920,6 @@
     	addMenuItem();
     	followPlayerResume();
     	followPlayerTracks();
-    	followPlayerChoice();
     }
 
     if (window.appready) startPlugin();
