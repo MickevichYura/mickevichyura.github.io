@@ -3220,8 +3220,9 @@
      * ушла в video, поэтому здесь её ещё можно дополнить медиафрагментом
      * #t=<секунды>: с ним video открывает файл сразу с нужного места. Если
      * медиафрагмент плееру незнаком, перематываем сами - на метаданных, когда
-     * кадра ещё нет и показывать начало файла нечем. Внешним плеерам Лампа
-     * отдаёт позицию сама, отдельным полем, их ссылку не трогаем.
+     * кадра ещё нет и показывать начало файла нечем; ждём их на документе,
+     * потому что своего video у плеера в этот момент ещё нет. Внешним плеерам
+     * Лампа отдаёт позицию сама, отдельным полем, их ссылку не трогаем.
      */
     function followPlayerResume() {
     	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.listener) return;
@@ -3243,7 +3244,7 @@
     		var video = Lampa.PlayerVideo.video();
     		if (!video) return;
 
-    		if (typeof current !== 'number') current = video.currentTime;
+    		if (typeof current !== 'number' || isNaN(current)) current = video.currentTime;
 
     		if (Math.abs(current - resume_at) < 5) {
     			if (resume_view) resume_view.continued = true; // место занято, Лампе перематывать нечего
@@ -3270,21 +3271,20 @@
     		resume_view = data.timeline;
 
     		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
-
-    		// ссылка уйдёт в video сразу после этого события, и элемент к тому
-    		// времени пересоздадут - забираем его следующим тиком. Метаданные
-    		// ждут ответа сети, раньше этого тика они появиться не могут
-    		setTimeout(function () {
-    			var video = resume_at ? Lampa.PlayerVideo.video() : null;
-
-    			if (video) video.addEventListener('loadedmetadata', function () { applyResume(); }, { once: true });
-    		}, 0);
     	});
+
+    	// Ждём метаданные на документе, а не на самом video: при переходе на
+    	// следующую серию Лампа сначала рушит плеер и только потом собирает
+    	// новый, и подписаться на элемент, которого ещё нет, не выйдет.
+    	// События media не всплывают, но фазу перехвата проходят исправно.
+    	document.addEventListener('loadedmetadata', function (e) {
+    		if (e.target === Lampa.PlayerVideo.video()) applyResume();
+    	}, true);
 
     	// на случай, если метаданные мы прослушали: на первых данных и на
     	// готовности играть - всё равно раньше, чем первый timeupdate у Лампы
     	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function (e) {
-    		applyResume(e && typeof e.current === 'number' ? e.current : undefined);
+    		applyResume(e && e.current);
     	});
     }
 
