@@ -830,15 +830,30 @@
 		 * не перематываем, досмотренное почти до конца начинаем заново, к самому
 		 * концу не встаём - оставляем 15 секунд. Режимы «спросить» и «сначала»
 		 * обходим стороной, там своё поведение.
+		 *
+		 * Секунды в отметке может и не быть: старый формат хранения, отметка от
+		 * другого балансера, запись, приехавшая синхронизацией - там остаётся
+		 * один процент. Лампа в этом случае считает место как процент от
+		 * длительности и всё равно перематывает, так что серия, которую никто
+		 * не открывал, дёргается на старте. Считаем так же, только по настоящей
+		 * длительности от сервера, а не по оценочной у плеера.
 		 */
 		resumeSeconds: function (view) {
 			var mode = Lampa.Storage.field('player_timecode');
 			if (mode === 'again' || mode === 'ask') return 0;
+			if (!view || view.percent >= 90) return 0;
 
-			var time = view ? parseFloat(view.time) : 0;
-			if (!time || isNaN(time) || view.percent >= 90) return 0;
+			var duration = parseFloat(view.duration);
+			var percent = parseFloat(view.percent);
+			var time = parseFloat(view.time);
 
-			var end = view.duration ? view.duration - 15 : 0;
+			if (isNaN(duration) || duration < 0) duration = 0;
+			if (isNaN(time) || time < 0) time = 0;
+			if (!time || (duration && time >= duration)) {
+				time = duration && percent > 0 ? Math.round(duration * percent / 100) : 0;
+			}
+
+			var end = duration ? duration - 15 : 0;
 			if (end > 0 && time > end) time = end;
 
 			return time > 10 ? Math.floor(time) : 0;
@@ -3580,6 +3595,7 @@
 
     	var resume_at = 0; // куда встать в текущем файле, 0 - вставать некуда
     	var resume_view = null;
+    	var seeks = 0;     // сколько перемоток записали в консоль на этом файле
 
     	/**
     	 * Встать на сохранённое место, если плеер этого ещё не сделал
@@ -3612,10 +3628,22 @@
     	Lampa.Player.listener.follow('start', function (data) {
     		resume_at = 0;
     		resume_view = null;
+    		seeks = 0;
 
     		if (!data || !data.dlna || typeof data.url !== 'string') return;
 
+    		// свой прошлый медиафрагмент снимаем: объект серии остаётся жить в
+    		// плейлисте, и при повторном запуске старая секунда увела бы файл не туда
+    		data.url = data.url.replace(/#t=\d+$/, '');
+
+    		var view = data.timeline || {};
     		var seconds = DLNA.resumeSeconds(data.timeline);
+
+    		console.log('DLNA', 'старт:', data.title || '', '- начинаем с', seconds || 0,
+    			'сек; в памяти время', Math.round(parseFloat(view.time) || 0),
+    			'процент', Math.round(parseFloat(view.percent) || 0),
+    			'длительность', Math.round(parseFloat(view.duration) || 0));
+
     		if (!seconds) return;
 
     		resume_at = seconds;
@@ -3623,6 +3651,15 @@
 
     		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
     	});
+
+    	// кто двигает место на старте: если в консоли перемотка стоит после
+    	// первого кадра и не на нашей секунде - её сделала Лампа, а не мы
+    	document.addEventListener('seeking', function (e) {
+    		if (e.target !== Lampa.PlayerVideo.video() || seeks >= 3) return;
+
+    		seeks++;
+    		console.log('DLNA', 'перемотка на', Math.round(e.target.currentTime), 'сек, наше место', resume_at);
+    	}, true);
 
     	// Ждём метаданные на документе, а не на самом video: при переходе на
     	// следующую серию Лампа сначала рушит плеер и только потом собирает
