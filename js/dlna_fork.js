@@ -3559,6 +3559,25 @@
     });
 
     /**
+     * Обёртка для наших подписок на события Лампы
+     *
+     * Лампа рассылает событие одним циклом в общем try/catch: подписчики после
+     * упавшего своего события уже не получат. Дорожки подписаны позже перемотки,
+     * поэтому одна наша ошибка гасит и старт с места, и выбор дорожек. Ловим
+     * ошибку у себя и показываем её на экране - на телевизоре консоли под рукой нет.
+     */
+    function guard(name, fn) {
+    	return function (event) {
+    		try {
+    			return fn(event);
+    		} catch (e) {
+    			console.error('DLNA', name, e && e.stack ? e.stack : e);
+    			if (Lampa.Noty) Lampa.Noty.show('DLNA: ' + name + ' - ' + (e && e.message ? e.message : e));
+    		}
+    	};
+    }
+
+    /**
      * Начинать файл сразу с сохранённого места
      *
      * Свою перемотку Лампа делает по первому timeupdate - то есть уже показав
@@ -3609,7 +3628,7 @@
     		video.currentTime = resume_at;
     	};
 
-    	Lampa.Player.listener.follow('start', function (data) {
+    	Lampa.Player.listener.follow('start', guard('перемотка, старт', function (data) {
     		resume_at = 0;
     		resume_view = null;
 
@@ -3622,21 +3641,21 @@
     		resume_view = data.timeline;
 
     		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
-    	});
+    	}));
 
     	// Ждём метаданные на документе, а не на самом video: при переходе на
     	// следующую серию Лампа сначала рушит плеер и только потом собирает
     	// новый, и подписаться на элемент, которого ещё нет, не выйдет.
     	// События media не всплывают, но фазу перехвата проходят исправно.
-    	document.addEventListener('loadedmetadata', function (e) {
+    	document.addEventListener('loadedmetadata', guard('перемотка, метаданные', function (e) {
     		if (e.target === Lampa.PlayerVideo.video()) applyResume();
-    	}, true);
+    	}), true);
 
     	// на случай, если метаданные мы прослушали: на первых данных и на
     	// готовности играть - всё равно раньше, чем первый timeupdate у Лампы
-    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function (e) {
+    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', guard('перемотка, первые данные', function (e) {
     		applyResume(e && e.current);
-    	});
+    	}));
     }
 
     /**
@@ -3832,7 +3851,7 @@
     		if (correct(now, list)) seen = null;
     	};
 
-    	Lampa.Player.listener.follow('start', function (data) {
+    	Lampa.Player.listener.follow('start', guard('дорожки, старт', function (data) {
     		parsed = null;
     		group = '';
     		want = null;
@@ -3871,12 +3890,17 @@
     				parsed = info;
 
     				apply();
+    			}).catch(function (e) {
+    				// внутри обещания ошибка иначе пропадёт молча, а вместе с ней
+    				// и имена дорожек в меню плеера
+    				console.error('DLNA', 'дорожки, разбор заголовка', e && e.stack ? e.stack : e);
+    				if (Lampa.Noty) Lampa.Noty.show('DLNA: дорожки - ' + (e && e.message ? e.message : e));
     			});
     		}, TRACKS_DELAY);
-    	});
+    	}));
 
     	// дорожки у плеера появляются вместе с данными, а не со ссылкой
-    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', function () {
+    	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', guard('дорожки, первые данные', function () {
     		apply();
 
     		// эталон снимаем как можно раньше: Лампа как раз расставила дорожки,
@@ -3886,9 +3910,9 @@
 
     			if (now && now.tracks.length) seen = pick(now, named(now) || {});
     		}
-    	});
+    	}));
 
-    	Lampa.PlayerVideo.listener.follow('timeupdate', function () {
+    	Lampa.PlayerVideo.listener.follow('timeupdate', guard('дорожки, слежение за выбором', function () {
     		if (!group) return;
 
     		var time = Date.now();
@@ -3913,7 +3937,7 @@
     		want = choice; // дальше сверяемся уже с этим выбором
 
     		DLNA.saveTrackChoice(group, choice);
-    	});
+    	}));
     }
 
     function startPlugin() {
