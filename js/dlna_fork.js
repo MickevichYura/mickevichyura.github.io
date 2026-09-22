@@ -71,8 +71,9 @@
 
 	var MKV_HEAD_BYTES = 262144; // сколько начала файла тянем ради списка дорожек
 	var HEAD_TIMEOUT = 10000;
-	var TRACKS_DELAY = 1000;
-	var CHOICE_CHECK = 2000;     // как часто смотрим, не переключили ли дорожку     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
+	var TRACKS_DELAY = 1000;     // ждём, пока плеер наберёт буфер: сервер один, и он же отдаёт поток
+	var CHOICE_CHECK = 2000;     // как часто смотрим, не переключили ли дорожку
+	var RESUME_HIDE_MAX = 10000; // дольше картинку не прячем, даже если на место так и не встали
 
 	var track_cache = {}; // ссылка на файл -> разобранные дорожки, null если не вышло
 
@@ -3588,17 +3589,43 @@
      *
      * Событие start приходит только внутреннему плееру и до того, как ссылка
      * ушла в video, поэтому здесь её ещё можно дополнить медиафрагментом
-     * #t=<секунды>: с ним video открывает файл сразу с нужного места. Если
-     * медиафрагмент плееру незнаком, перематываем сами - на метаданных, когда
-     * кадра ещё нет и показывать начало файла нечем; ждём их на документе,
-     * потому что своего video у плеера в этот момент ещё нет. Внешним плеерам
-     * Лампа отдаёт позицию сама, отдельным полем, их ссылку не трогаем.
+     * #t=<секунды>. Если медиафрагмент плееру незнаком, перематываем сами -
+     * на метаданных; ждём их на документе, потому что своего video у плеера
+     * в этот момент ещё нет. Внешним плеерам Лампа отдаёт позицию сама,
+     * отдельным полем, их ссылку не трогаем.
+     *
+     * Ни то, ни другое не избавляет от первого кадра: Chromium разбирает
+     * медиафрагмент той же перемоткой после метаданных, а сам к этому
+     * моменту уже декодирует и рисует кадр с нуля. Пока большой MKV тянет
+     * с конца файла таблицу перемотки, на экране висит начало, и только потом
+     * картинка прыгает на место. Поэтому от старта и до окончания перемотки
+     * video прозрачный: вместо начала файла - чёрный фон и загрузка Лампы.
      */
     function followPlayerResume() {
     	if (!Lampa.Player || !Lampa.Player.listener || !Lampa.PlayerVideo || !Lampa.PlayerVideo.listener) return;
 
     	var resume_at = 0; // куда встать в текущем файле, 0 - вставать некуда
     	var resume_view = null;
+    	var hide_timer = 0;
+
+    	$('<style id="dlna-resume-style">body.dlna-resuming .player-video__video{opacity:0}</style>').appendTo('head');
+
+    	// класс на body, а не на video: самого элемента на старте ещё нет
+    	var hidePicture = function (status) {
+    		clearTimeout(hide_timer);
+    		$('body').toggleClass('dlna-resuming', status);
+
+    		if (status) hide_timer = setTimeout(function () { hidePicture(false); }, RESUME_HIDE_MAX);
+    	};
+
+    	// показываем, когда встали и перемотка закончилась: пока она идёт,
+    	// currentTime уже отвечает целью, а на экране всё ещё начало файла
+    	var showLanded = function (e) {
+    		var video = Lampa.PlayerVideo.video();
+    		if (!video || e.target !== video || video.seeking || resume_at) return;
+
+    		if ($('body').hasClass('dlna-resuming')) hidePicture(false);
+    	};
 
     	/**
     	 * Встать на сохранённое место, если плеер этого ещё не сделал
@@ -3616,21 +3643,25 @@
 
     		if (typeof current !== 'number' || isNaN(current)) current = video.currentTime;
 
-    		if (Math.abs(current - resume_at) < 5) {
-    			if (resume_view) resume_view.continued = true; // место занято, Лампе перематывать нечего
+    		if (!landed(current)) video.currentTime = resume_at;
+    	};
 
-    			resume_at = 0;
-    			resume_view = null;
+    	// стоим ли уже на месте; если да - дальше не перематываем ни мы, ни Лампа
+    	var landed = function (current) {
+    		if (Math.abs(current - resume_at) >= 5) return false;
 
-    			return;
-    		}
+    		if (resume_view) resume_view.continued = true; // место занято, Лампе перематывать нечего
 
-    		video.currentTime = resume_at;
+    		resume_at = 0;
+    		resume_view = null;
+
+    		return true;
     	};
 
     	Lampa.Player.listener.follow('start', guard('перемотка, старт', function (data) {
     		resume_at = 0;
     		resume_view = null;
+    		hidePicture(false);
 
     		if (!data || !data.dlna || typeof data.url !== 'string') return;
 
@@ -3639,8 +3670,15 @@
 
     		resume_at = seconds;
     		resume_view = data.timeline;
+    		hidePicture(true);
 
     		if (data.url.indexOf('#') === -1) data.url += '#t=' + seconds;
+    	}));
+
+    	Lampa.Player.listener.follow('destroy', guard('перемотка, выход', function () {
+    		resume_at = 0;
+    		resume_view = null;
+    		hidePicture(false);
     	}));
 
     	// Ждём метаданные на документе, а не на самом video: при переходе на
@@ -3656,6 +3694,19 @@
     	Lampa.PlayerVideo.listener.follow('loadeddata,canplay', guard('перемотка, первые данные', function (e) {
     		applyResume(e && e.current);
     	}));
+
+    	// перемотка закончилась: если встали туда, куда просили, открываем
+    	// картинку. Заново отсюда не перематываем - ранняя перемотка могла
+    	// упереться в оценочный конец файла, и повтор на каждом seeked бился
+    	// бы в него по кругу; повторяет applyResume на данных и готовности
+    	document.addEventListener('seeked', guard('перемотка, встали', function (e) {
+    		var video = Lampa.PlayerVideo.video();
+    		if (resume_at && video && e.target === video) landed(video.currentTime);
+
+    		showLanded(e);
+    	}), true);
+
+    	document.addEventListener('timeupdate', guard('перемотка, воспроизведение', showLanded), true);
     }
 
     /**
